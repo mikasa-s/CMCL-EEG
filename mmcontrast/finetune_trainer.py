@@ -13,7 +13,7 @@ from torch.utils.data import DataLoader, DistributedSampler
 from tqdm import tqdm
 
 from .datasets import PairedEEGfMRIDataset
-from .distributed import cleanup_distributed, configure_runtime_devices, gather_tensor, init_distributed, is_dist_initialized, is_main_process
+from .distributed import cleanup_distributed, configure_cudnn, configure_runtime_devices, gather_tensor, init_distributed, is_dist_initialized, is_main_process, runtime_summary
 from .metrics import classification_metrics
 from .models import EEGfMRIClassifier
 
@@ -24,6 +24,7 @@ class FinetuneTrainer:
         # 需要在 CPU 上运行或显存不足时，可通过配置强制走 CPU。
         force_cpu = configure_runtime_devices(cfg.get("train", {}))
         self.world_size, self.rank, self.local_rank, self.device = init_distributed(force_cpu=force_cpu)
+        self.cudnn_benchmark = configure_cudnn(cfg.get("train", {}), device=self.device)
         self.project_root = Path(__file__).resolve().parent.parent
 
         train_cfg = cfg["train"]
@@ -72,6 +73,16 @@ class FinetuneTrainer:
         self.model = EEGfMRIClassifier(model_cfg).to(self.device)
         if is_main_process():
             total_params, trainable_params = self.count_parameters(self.model)
+            runtime = runtime_summary(train_cfg, self.device, self.world_size)
+            print(
+                "Runtime: "
+                f"device={runtime['device']}, "
+                f"CUDA_VISIBLE_DEVICES={runtime['cuda_visible_devices']}, "
+                f"world_size={runtime['world_size']}, "
+                f"num_workers={runtime['num_workers']}, "
+                f"pin_memory={runtime['pin_memory']}, "
+                f"cudnn_benchmark={runtime['cudnn_benchmark']}"
+            )
             print(self.model.initialization_summary)
             print(f"Model params: total={total_params:,}, trainable={trainable_params:,}")
         if is_dist_initialized():

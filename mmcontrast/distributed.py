@@ -1,6 +1,8 @@
 """分布式训练相关的轻量工具函数。"""
 
 import os
+from typing import Any
+
 import torch
 import torch.distributed as dist
 
@@ -36,6 +38,32 @@ def configure_runtime_devices(train_cfg: dict | None = None) -> bool:
         os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(str(index) for index in range(gpu_count_int))
 
     return False
+
+
+def configure_cudnn(train_cfg: dict | None = None, device: torch.device | None = None) -> bool:
+    """按配置启用 cuDNN benchmark，并返回最终是否启用。"""
+    train_cfg = train_cfg or {}
+    requested = bool(train_cfg.get("cudnn_benchmark", True))
+    use_cuda = (device is not None and device.type == "cuda") or torch.cuda.is_available()
+    enabled = bool(requested and use_cuda)
+    torch.backends.cudnn.benchmark = enabled
+    return enabled
+
+
+def runtime_summary(train_cfg: dict | None, device: torch.device, world_size: int) -> dict[str, Any]:
+    """汇总当前训练实际使用的运行时环境。"""
+    train_cfg = train_cfg or {}
+    visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES", "<unset>")
+    return {
+        "device": str(device),
+        "cuda_available": bool(torch.cuda.is_available()),
+        "cuda_device_count": int(torch.cuda.device_count()),
+        "cuda_visible_devices": visible_devices,
+        "world_size": int(world_size),
+        "num_workers": int(train_cfg.get("num_workers", 4)),
+        "pin_memory": bool(train_cfg.get("pin_memory", True)),
+        "cudnn_benchmark": bool(torch.backends.cudnn.benchmark),
+    }
 
 
 def init_distributed(force_cpu: bool = False) -> tuple[int, int, int, torch.device]:

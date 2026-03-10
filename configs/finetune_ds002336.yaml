@@ -1,22 +1,25 @@
 train:
-  batch_size: 4
-  eval_batch_size: 4
-  num_workers: 2
+  force_cpu: false
+  gpu_count: 1
+  gpu_ids: []
+  batch_size: 64
+  eval_batch_size: 64
+  num_workers: 3
   pin_memory: true
 
 data:
-  train_manifest_csv: cache/ds002739_subject_packed_eeg2_fmri6/manifest_all.csv
-  val_manifest_csv: cache/ds002739_subject_packed_eeg2_fmri6/manifest_all.csv
-  test_manifest_csv: cache/ds002739_subject_packed_eeg2_fmri6/manifest_all.csv
-  root_dir: cache/ds002739_subject_packed_eeg2_fmri6
-  expected_eeg_shape: [63, 2, 200]
-  expected_fmri_shape: [48, 48, 48, 3]
+  train_manifest_csv: cache/ds002336/splits_subjectwise/manifest_train.csv
+  val_manifest_csv: cache/ds002336/splits_subjectwise/manifest_val.csv
+  test_manifest_csv: cache/ds002336/splits_subjectwise/manifest_test.csv
+  root_dir: cache/ds002336
+  expected_eeg_shape: [63, 20, 200]
+  expected_fmri_shape: [48, 48, 48, 10]
   normalize_eeg: true
   normalize_fmri: true
   eeg_scale: 1.0
   fmri_scale: 1.0
   fmri_input_type: volume
-  fmri_target_shape: [48, 48, 48, 3]
+  fmri_target_shape: [48, 48, 48, 10]
   fmri_spatial_strategy: pad_or_crop
   fmri_temporal_strategy: pad_or_crop
   fmri_pad_value: 0.0
@@ -28,7 +31,7 @@ eeg_model:
   out_dim: 200
   d_model: 200
   dim_feedforward: 800
-  seq_len: 2
+  seq_len: 20
   n_layer: 12
   nhead: 8
   freeze_backbone: false
@@ -36,7 +39,7 @@ eeg_model:
 fmri_model:
   backbone: neurostorm
   checkpoint_path: ""
-  img_size: [48, 48, 48, 3]
+  img_size: [48, 48, 48, 10]
   in_chans: 1
   embed_dim: 24
   first_window_size: [2, 2, 2, 2]
@@ -50,20 +53,20 @@ fmri_model:
   freeze_backbone: false
 
 finetune:
-  output_dir: outputs/finetune_neurostorm_volume_ds002739_packed
+  output_dir: outputs/ds002336/finetune
   contrastive_checkpoint_path: ""
   num_classes: 2
   selection_metric: accuracy
   fusion: eeg_only
-  hidden_dim: 512
+  hidden_dim: 256
   dropout: 0.2
   freeze_encoders: false
-  epochs: 10
-  lr: 0.0001
-  min_lr: 0.000001
+  epochs: 20
+  lr: 0.0003
+  min_lr: 0.00001
   weight_decay: 0.01
   grad_clip: 1.0
   use_amp: true
   amp_dtype: fp16
-  log_interval: 20
+  log_interval: 100
   eval_interval: 1

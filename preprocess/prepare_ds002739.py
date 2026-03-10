@@ -178,7 +178,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--split-mode",
-        default="subject",
+        default="loso",
         choices=["none", "subject", "loso"],
         help="Optional split generation after preprocessing. subject writes train/val/test manifests; loso writes per-fold manifests.",
     )
@@ -188,9 +188,9 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Optional directory for generated split manifests. Defaults to <output-root>/splits_subjectwise or <output-root>/loso_subjectwise.",
     )
-    parser.add_argument("--train-subjects", type=int, default=6, help="Number of subjects in train split when --split-mode=subject.")
+    parser.add_argument("--train-subjects", type=int, default=21, help="Number of subjects in train split when --split-mode=subject.")
     parser.add_argument("--val-subjects", type=int, default=2, help="Number of subjects in val split or LOSO validation subjects.")
-    parser.add_argument("--test-subjects", type=int, default=2, help="Number of subjects in test split when --split-mode=subject.")
+    parser.add_argument("--test-subjects", type=int, default=1, help="Number of subjects in test split when --split-mode=subject.")
     return parser.parse_args()
 
 
@@ -424,31 +424,10 @@ def center_crop_spatial_max(data: np.ndarray, max_shape: Sequence[int]) -> np.nd
     return data[tuple(slices)].astype(np.float32)
 
 
-def compute_zero_background_mask(data: np.ndarray) -> np.ndarray:
-    return np.all(np.abs(data) <= 1e-8, axis=-1)
-
-
-def normalize_fmri_volume(data: np.ndarray, background_mask: np.ndarray) -> np.ndarray:
-    output = np.array(data, copy=True)
-    output[background_mask, :] = 0.0
-    output[output < 0] = 0.0
-    brain_mask = ~background_mask
-    brain_values = output[brain_mask, :]
-    if brain_values.size == 0:
-        return output.astype(np.float32)
-    mean = float(brain_values.mean())
-    std = float(brain_values.std()) + 1e-6
-    output[brain_mask, :] = (output[brain_mask, :] - mean) / std
-    output[background_mask, :] = 0.0
-    return output.astype(np.float32)
-
-
 def preprocess_fmri_volume(data: np.ndarray, voxel_size: Sequence[float], source_tr: float, args: argparse.Namespace) -> np.ndarray:
     output = spatial_resample_volume(data, voxel_size=voxel_size, target_voxel_size=args.fmri_voxel_size)
     output = temporal_resample_volume(output, source_tr=source_tr, target_tr=args.tr)
     output = center_crop_spatial_max(output, max_shape=args.fmri_max_shape)
-    background_mask = compute_zero_background_mask(output)
-    output = normalize_fmri_volume(output, background_mask=background_mask)
     if args.fmri_float16:
         return output.astype(np.float16)
     return output.astype(np.float32)

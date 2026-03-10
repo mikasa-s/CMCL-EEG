@@ -1,10 +1,10 @@
 param(
-    [string]$Config = "configs/train_contrastive_ds002739_subject_packed.yaml"
+    [string]$Config = "configs/train_ds002739.yaml"
 )
 
 $ErrorActionPreference = "Stop"
 
-Set-Location (Split-Path -Parent $PSScriptRoot)
+Set-Location (Resolve-Path (Join-Path $PSScriptRoot "..\.."))
 
 $python = "D:\anaconda3\envs\mamba\python.exe"
 

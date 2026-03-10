@@ -13,7 +13,7 @@ from torch.utils.data import DataLoader, DistributedSampler
 from tqdm import tqdm
 
 from .datasets import PairedEEGfMRIDataset
-from .distributed import cleanup_distributed, configure_runtime_devices, gather_tensor, init_distributed, is_dist_initialized, is_main_process
+from .distributed import cleanup_distributed, configure_cudnn, configure_runtime_devices, gather_tensor, init_distributed, is_dist_initialized, is_main_process, runtime_summary
 from .losses import SymmetricInfoNCELoss
 from .metrics import contrastive_retrieval_metrics
 from .models import EEGfMRIContrastiveModel
@@ -25,6 +25,7 @@ class ContrastiveTrainer:
         # 需要在 CPU 上运行或显存不足时，可通过配置强制走 CPU。
         force_cpu = configure_runtime_devices(cfg.get("train", {}))
         self.world_size, self.rank, self.local_rank, self.device = init_distributed(force_cpu=force_cpu)
+        self.cudnn_benchmark = configure_cudnn(cfg.get("train", {}), device=self.device)
         self.project_root = Path(__file__).resolve().parent.parent
 
         train_cfg = cfg["train"]
@@ -32,13 +33,13 @@ class ContrastiveTrainer:
 
         train_dataset = self.build_dataset(data_cfg, split="train")
         # 多卡时由 DistributedSampler 负责切分样本，避免重复读同一数据。
-        self.sampler = DistributedSampler(train_dataset, shuffle=True, drop_last=True) if is_dist_initialized() else None
+        self.sampler = DistributedSampler(train_dataset, shuffle=True, drop_last=False) if is_dist_initialized() else None
         self.train_loader = self.build_loader(
             train_dataset,
             batch_size=int(train_cfg.get("batch_size", 16)),
             sampler=self.sampler,
             shuffle=self.sampler is None,
-            drop_last=True,
+            drop_last=False,
             num_workers=int(train_cfg.get("num_workers", 4)),
             pin_memory=bool(train_cfg.get("pin_memory", True)),
         )
@@ -48,6 +49,16 @@ class ContrastiveTrainer:
         self.model = self.build_model(cfg)
         if is_main_process():
             total_params, trainable_params = self.count_parameters(self.model)
+            runtime = runtime_summary(train_cfg, self.device, self.world_size)
+            print(
+                "Runtime: "
+                f"device={runtime['device']}, "
+                f"CUDA_VISIBLE_DEVICES={runtime['cuda_visible_devices']}, "
+                f"world_size={runtime['world_size']}, "
+                f"num_workers={runtime['num_workers']}, "
+                f"pin_memory={runtime['pin_memory']}, "
+                f"cudnn_benchmark={runtime['cudnn_benchmark']}"
+            )
             print(f"Model params: total={total_params:,}, trainable={trainable_params:,}")
         if is_dist_initialized():
             # 只有真正进入分布式模式时才包装 DDP。

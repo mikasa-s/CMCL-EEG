@@ -1,28 +1,17 @@
 train:
-  output_dir: outputs/contrastive_ds002739_subject_packed
   force_cpu: false
   gpu_count: 1
   gpu_ids: []
-  epochs: 50
-  batch_size: 4
-  eval_batch_size: 4
-  num_workers: 1
+  batch_size: 256
+  eval_batch_size: 256
+  num_workers: 3
   pin_memory: true
-  lr: 0.0003
-  min_lr: 0.000001
-  weight_decay: 0.01
-  grad_clip: 1.0
-  use_amp: true
-  amp_dtype: fp16
-  temperature: 0.07
-  projection_dim: 256
-  log_interval: 20
-  eval_interval: 1
-  resume_path: ""
 
 data:
-  train_manifest_csv: cache/ds002739_subject_packed_eeg53_fmri6/manifest_all.csv
-  root_dir: cache/ds002739_subject_packed_eeg53_fmri6
+  train_manifest_csv: cache/ds002739/manifest_all.csv
+  val_manifest_csv: cache/ds002739/manifest_all.csv
+  test_manifest_csv: cache/ds002739/manifest_all.csv
+  root_dir: cache/ds002739
   expected_eeg_shape: [53, 2, 200]
   expected_fmri_shape: [48, 48, 48, 3]
   normalize_eeg: true
@@ -62,3 +51,22 @@ fmri_model:
   last_layer_full_MSA: false
   attn_drop_rate: 0.0
   freeze_backbone: false
+
+finetune:
+  output_dir: outputs/ds002739/finetune
+  contrastive_checkpoint_path: ""
+  num_classes: 2
+  selection_metric: accuracy
+  fusion: eeg_only
+  hidden_dim: 256
+  dropout: 0.2
+  freeze_encoders: false
+  epochs: 20
+  lr: 0.0003
+  min_lr: 0.00001
+  weight_decay: 0.01
+  grad_clip: 1.0
+  use_amp: true
+  amp_dtype: fp16
+  log_interval: 200
+  eval_interval: 1

@@ -1,11 +1,11 @@
 param(
     [string]$DsRoot = "D:\OpenNeuro\ds002739",
-    [string]$OutputRoot = "cache/ds002739_subject_packed_eeg2_fmri6",
+    [string]$OutputRoot = "cache/ds002739",
     [string[]]$Subjects = @(),
     [string[]]$Runs = @(),
     [ValidateSet("none", "subject", "loso")]
-    [string]$SplitMode = "subject",
-    [int]$TrainSubjects = 7,
+    [string]$SplitMode = "loso",
+    [int]$TrainSubjects = 21,
     [int]$ValSubjects = 2,
     [int]$TestSubjects = 1,
     [double]$EegWindowSec = 2.0,
@@ -14,11 +14,19 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-Set-Location (Split-Path -Parent $PSScriptRoot)
+Set-Location (Resolve-Path (Join-Path $PSScriptRoot "..\.."))
 
 $python = "D:\anaconda3\envs\mamba\python.exe"
 
-$args = @(
+if ($SplitMode -ne "none" -and $Subjects.Count -gt 0) {
+    $requiredSubjects = if ($SplitMode -eq "loso") { $ValSubjects + 1 } else { $TrainSubjects + $ValSubjects + $TestSubjects }
+    if ($Subjects.Count -lt $requiredSubjects) {
+        Write-Warning "Provided subject subset is smaller than the requested split sizes; disabling split generation for this run."
+        $SplitMode = "none"
+    }
+}
+
+$cliArgs = @(
     "preprocess/prepare_ds002739.py",
     "--ds-root", $DsRoot,
     "--output-root", $OutputRoot,
@@ -40,13 +48,13 @@ $args = @(
 )
 
 if ($Subjects.Count -gt 0) {
-    $args += "--subjects"
-    $args += $Subjects
+    $cliArgs += "--subjects"
+    $cliArgs += $Subjects
 }
 
 if ($Runs.Count -gt 0) {
-    $args += "--runs"
-    $args += $Runs
+    $cliArgs += "--runs"
+    $cliArgs += $Runs
 }
 
 if ($Subjects.Count -gt 0) {
@@ -62,4 +70,4 @@ if ($Runs.Count -gt 0) {
 
 Write-Host ("Output root: " + $OutputRoot)
 Write-Host ("Split mode: " + $SplitMode)
-& $python @args
+& $python @cliArgs
