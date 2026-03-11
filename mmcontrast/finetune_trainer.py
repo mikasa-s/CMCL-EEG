@@ -3,6 +3,7 @@ from __future__ import annotations
 """分类微调训练器。"""
 
 from contextlib import nullcontext
+import csv
 import json
 from pathlib import Path
 from typing import Any
@@ -118,6 +119,9 @@ class FinetuneTrainer:
         self.output_dir = self.resolve_path(str(finetune_cfg.get("output_dir", "outputs/finetune")))
         self.ckpt_dir = self.output_dir / "checkpoints"
         self.best_checkpoint_path = self.ckpt_dir / "best.pth"
+        eval_ckpt = str(finetune_cfg.get("eval_checkpoint_path", "")).strip()
+        self.eval_checkpoint_path = self.resolve_path(eval_ckpt) if eval_ckpt else self.best_checkpoint_path
+        self.test_only_mode = bool(finetune_cfg.get("test_only", False))
         if is_main_process():
             self.ckpt_dir.mkdir(parents=True, exist_ok=True)
 
@@ -158,6 +162,7 @@ class FinetuneTrainer:
             num_workers=num_workers,
             pin_memory=pin_memory,
             drop_last=drop_last,
+            persistent_workers=num_workers > 0,
         )
 
     def build_optional_eval_loader(self, data_cfg: dict[str, Any], train_cfg: dict[str, Any], split: str):
@@ -207,6 +212,73 @@ class FinetuneTrainer:
             self.model.module.load_state_dict(model_state, strict=False)
         else:
             self.model.load_state_dict(model_state, strict=False)
+
+    def save_logits_artifacts(self, split_name: str, logits: torch.Tensor, labels: torch.Tensor) -> None:
+        """保存分类 logits 明细与摘要，便于排查异常输出。"""
+        if not is_main_process():
+            return
+
+        logits_cpu = logits.detach().float().cpu()
+        labels_cpu = labels.detach().long().cpu()
+        preds_cpu = logits_cpu.argmax(dim=1)
+        probs_cpu = torch.softmax(logits_cpu, dim=1)
+        prob_max_cpu = probs_cpu.max(dim=1).values
+        topk_values = torch.topk(logits_cpu, k=min(2, logits_cpu.shape[1]), dim=1).values
+        if logits_cpu.shape[1] > 1:
+            margin_cpu = topk_values[:, 0] - topk_values[:, 1]
+        else:
+            margin_cpu = topk_values[:, 0]
+        abs_max_per_row = logits_cpu.abs().max(dim=1).values
+        top_row_count = min(10, logits_cpu.shape[0])
+        top_indices = torch.topk(abs_max_per_row, k=top_row_count).indices.tolist() if top_row_count > 0 else []
+
+        summary = {
+            "sample_count": int(logits_cpu.shape[0]),
+            "num_classes": int(logits_cpu.shape[1]) if logits_cpu.ndim == 2 else 0,
+            "contains_nan": bool(torch.isnan(logits_cpu).any().item()),
+            "contains_inf": bool(torch.isinf(logits_cpu).any().item()),
+            "logit_min": float(logits_cpu.min().item()),
+            "logit_max": float(logits_cpu.max().item()),
+            "logit_mean": float(logits_cpu.mean().item()),
+            "logit_std": float(logits_cpu.std(unbiased=False).item()) if logits_cpu.numel() > 1 else 0.0,
+            "prob_max_mean": float(prob_max_cpu.mean().item()),
+            "prob_max_min": float(prob_max_cpu.min().item()),
+            "prob_max_max": float(prob_max_cpu.max().item()),
+            "margin_mean": float(margin_cpu.mean().item()),
+            "margin_min": float(margin_cpu.min().item()),
+            "margin_max": float(margin_cpu.max().item()),
+            "top_abs_logit_rows": [
+                {
+                    "sample_index": int(index),
+                    "label": int(labels_cpu[index].item()),
+                    "pred": int(preds_cpu[index].item()),
+                    "abs_max_logit": float(abs_max_per_row[index].item()),
+                    "prob_max": float(prob_max_cpu[index].item()),
+                    "margin": float(margin_cpu[index].item()),
+                    "logits": [float(value) for value in logits_cpu[index].tolist()],
+                }
+                for index in top_indices
+            ],
+        }
+
+        with open(self.output_dir / f"{split_name}_logits_summary.json", "w", encoding="utf-8") as handle:
+            json.dump(summary, handle, ensure_ascii=False, indent=2)
+
+        header = ["sample_index", "label", "pred", "prob_max", "margin"] + [f"logit_{class_idx}" for class_idx in range(logits_cpu.shape[1])]
+        with open(self.output_dir / f"{split_name}_logits.csv", "w", encoding="utf-8", newline="") as handle:
+            writer = csv.writer(handle)
+            writer.writerow(header)
+            for sample_index in range(logits_cpu.shape[0]):
+                writer.writerow(
+                    [
+                        sample_index,
+                        int(labels_cpu[sample_index].item()),
+                        int(preds_cpu[sample_index].item()),
+                        float(prob_max_cpu[sample_index].item()),
+                        float(margin_cpu[sample_index].item()),
+                        *[float(value) for value in logits_cpu[sample_index].tolist()],
+                    ]
+                )
 
     def train_one_epoch(self, epoch: int) -> float:
         """执行一个 epoch 的下游分类训练。"""
@@ -258,7 +330,12 @@ class FinetuneTrainer:
         return running / max(1, len(self.train_loader))
 
     @torch.no_grad()
-    def evaluate(self, loader: DataLoader | None, split_name: str) -> dict[str, float] | None:
+    def evaluate(
+        self,
+        loader: DataLoader | None,
+        split_name: str,
+        save_logits: bool = False,
+    ) -> dict[str, float] | None:
         """在验证集或测试集上计算分类指标。"""
         if loader is None:
             return None
@@ -284,10 +361,31 @@ class FinetuneTrainer:
         metrics = classification_metrics(logits, labels)
         metrics["loss"] = total_loss / max(1, len(loader))
 
+        if save_logits:
+            self.save_logits_artifacts(split_name=split_name, logits=logits, labels=labels)
+
         if is_main_process():
             summary = ", ".join([f"{key}={value:.4f}" for key, value in metrics.items()])
             print(f"[{split_name}] {summary}")
         return metrics
+
+    def test_only(self) -> None:
+        """直接加载已有微调 checkpoint 并在测试集上评估。"""
+        if self.test_loader is None:
+            raise ValueError("test_only requires data.test_manifest_csv to be configured.")
+        if not self.eval_checkpoint_path.exists():
+            raise FileNotFoundError(f"Finetune checkpoint not found for test_only: {self.eval_checkpoint_path}")
+
+        self.load_checkpoint(self.eval_checkpoint_path)
+        test_metrics = self.evaluate(self.test_loader, split_name="test", save_logits=True)
+        payload = {
+            "mode": "test_only",
+            "checkpoint_path": str(self.eval_checkpoint_path),
+            "test_metrics": test_metrics,
+        }
+        self.save_metrics("test_metrics.json", test_metrics or {})
+        self.save_metrics("final_metrics.json", payload)
+        cleanup_distributed()
 
     def fit(self) -> None:
         """执行完整微调流程，使用验证集指标选择最佳模型，并只对最佳模型做测试。"""
@@ -327,7 +425,7 @@ class FinetuneTrainer:
 
         if self.test_loader is not None:
             self.load_checkpoint(self.best_checkpoint_path)
-            test_metrics = self.evaluate(self.test_loader, split_name="test")
+            test_metrics = self.evaluate(self.test_loader, split_name="test", save_logits=True)
             if test_metrics is not None:
                 final_metrics["test_metrics"] = test_metrics
                 self.save_metrics("test_metrics.json", test_metrics)

@@ -19,4 +19,7 @@ def run_finetuning(config_path: str) -> None:
         cfg.dump(cfg.section("finetune").get("output_dir", "outputs/finetune"))
 
     trainer = FinetuneTrainer(cfg.raw)
-    trainer.fit()
+    if bool(cfg.section("finetune").get("test_only", False)):
+        trainer.test_only()
+    else:
+        trainer.fit()

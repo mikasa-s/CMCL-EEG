@@ -2,15 +2,15 @@ train:
   force_cpu: false
   gpu_count: 1
   gpu_ids: []
-  batch_size: 256
-  eval_batch_size: 256
+  batch_size: 128
+  eval_batch_size: 128
   num_workers: 3
   pin_memory: true
 
 data:
-  train_manifest_csv: cache/ds002739/manifest_all.csv
-  val_manifest_csv: cache/ds002739/manifest_all.csv
-  test_manifest_csv: cache/ds002739/manifest_all.csv
+  train_manifest_csv: cache/ds002739/loso_subjectwise/fold_sub-01/manifest_train.csv
+  val_manifest_csv: cache/ds002739/loso_subjectwise/fold_sub-01/manifest_val.csv
+  test_manifest_csv: cache/ds002739/loso_subjectwise/fold_sub-01/manifest_test.csv
   root_dir: cache/ds002739
   expected_eeg_shape: [53, 2, 200]
   expected_fmri_shape: [48, 48, 48, 3]
@@ -53,7 +53,7 @@ fmri_model:
   freeze_backbone: false
 
 finetune:
-  output_dir: outputs/ds002739/finetune
+  output_dir: outputs/ds002739/finetune/fold_sub-01
   contrastive_checkpoint_path: ""
   num_classes: 2
   selection_metric: accuracy

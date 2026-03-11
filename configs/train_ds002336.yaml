@@ -1,11 +1,11 @@
 train:
-  output_dir: outputs/ds002336/contrastive
+  output_dir: outputs/ds002336/contrastive/fold_sub-xp101
   force_cpu: false
   gpu_count: 1
   gpu_ids: []
-  epochs: 20
-  batch_size: 128
-  eval_batch_size: 128
+  epochs: 1
+  batch_size: 16
+  eval_batch_size: 16
   num_workers: 3
   pin_memory: true
   lr: 0.0003
@@ -21,7 +21,7 @@ train:
   resume_path: ""
 
 data:
-  train_manifest_csv: cache/ds002336/manifest_all.csv
+  train_manifest_csv: cache/ds002336/loso_subjectwise/fold_sub-xp101/manifest_train.csv
   root_dir: cache/ds002336
   expected_eeg_shape: [63, 20, 200]
   expected_fmri_shape: [48, 48, 48, 10]

@@ -4,6 +4,7 @@ param(
     [string]$DataRoot = "cache/ds002336",
     [string]$LosoDir = "cache/ds002336/loso_subjectwise",
     [string]$OutputRoot = "outputs/ds002336",
+    [switch]$TestOnly,
     [switch]$SkipContrastive,
     [switch]$ForceCpu,
     [int]$TrainEpochs = 0,
@@ -66,21 +67,69 @@ if ($foldDirs.Count -eq 0) {
     throw "No LOSO fold directories found under $LosoDir"
 }
 
+$foldNameMap = @{}
+for ($foldIndex = 0; $foldIndex -lt $foldDirs.Count; $foldIndex++) {
+    $foldNameMap[$foldDirs[$foldIndex].Name] = "fold$($foldIndex + 1)"
+}
+
 Write-Host "Running ds002336 LOSO cross-validation..."
 Write-Host ("LOSO dir: " + $losoPath)
 Write-Host ("Output root: " + $outputPath)
+Write-Host ("Fold labels: " + (($foldDirs | ForEach-Object { $foldNameMap[$_.Name] + "=" + $_.Name }) -join ", "))
+if ($TestOnly) {
+    Write-Host "Mode: test-only"
+}
 
 foreach ($foldDir in $foldDirs) {
     $foldName = $foldDir.Name
+    $displayFoldName = $foldNameMap[$foldName]
     $trainManifest = Join-Path $foldDir.FullName "manifest_train.csv"
     $valManifest = Join-Path $foldDir.FullName "manifest_val.csv"
     $testManifest = Join-Path $foldDir.FullName "manifest_test.csv"
     $contrastiveOutputDir = Join-Path $contrastiveRoot $foldName
     $finetuneOutputDir = Join-Path $finetuneRoot $foldName
     $contrastiveCheckpoint = Join-Path $contrastiveOutputDir "checkpoints\best.pth"
+    $finetuneCheckpoint = Join-Path $finetuneOutputDir "checkpoints\best.pth"
 
     if (!(Test-Path $trainManifest) -or !(Test-Path $valManifest) -or !(Test-Path $testManifest)) {
         throw "Missing LOSO manifest(s) under $($foldDir.FullName)"
+    }
+
+    if ($TestOnly) {
+        if (!(Test-Path $finetuneCheckpoint)) {
+            throw "Expected finetune checkpoint not found for test-only: $finetuneCheckpoint"
+        }
+
+        $finetuneArgs = @(
+            "run_finetune.py",
+            "--config", $FinetuneConfig,
+            "--train-manifest", $trainManifest,
+            "--val-manifest", $valManifest,
+            "--test-manifest", $testManifest,
+            "--root-dir", $dataPath,
+            "--output-dir", $finetuneOutputDir,
+            "--finetune-checkpoint", $finetuneCheckpoint,
+            "--test-only"
+        )
+        if ($BatchSize -gt 0) {
+            $finetuneArgs += "--batch-size"
+            $finetuneArgs += $BatchSize.ToString()
+        }
+        if ($EvalBatchSize -gt 0) {
+            $finetuneArgs += "--eval-batch-size"
+            $finetuneArgs += $EvalBatchSize.ToString()
+        }
+        if ($NumWorkers -ge 0) {
+            $finetuneArgs += "--num-workers"
+            $finetuneArgs += $NumWorkers.ToString()
+        }
+        if ($ForceCpu) {
+            $finetuneArgs += "--force-cpu"
+        }
+
+        Write-Host ("[" + $displayFoldName + "] test-only using finetune checkpoint: " + $finetuneCheckpoint)
+        & $python @finetuneArgs
+        continue
     }
 
     if (-not $SkipContrastive) {
@@ -112,11 +161,12 @@ foreach ($foldDir in $foldDirs) {
             $trainArgs += "--force-cpu"
         }
 
-        Write-Host ("[" + $foldName + "] contrastive")
+        Write-Host ("[" + $displayFoldName + "] contrastive")
         & $python @trainArgs
     }
 
-    if (!(Test-Path $contrastiveCheckpoint)) {
+    $useContrastiveCheckpoint = Test-Path $contrastiveCheckpoint
+    if ((-not $SkipContrastive) -and (-not $useContrastiveCheckpoint)) {
         throw "Expected contrastive checkpoint not found: $contrastiveCheckpoint"
     }
 
@@ -127,9 +177,11 @@ foreach ($foldDir in $foldDirs) {
         "--val-manifest", $valManifest,
         "--test-manifest", $testManifest,
         "--root-dir", $dataPath,
-        "--output-dir", $finetuneOutputDir,
-        "--contrastive-checkpoint", $contrastiveCheckpoint
+        "--output-dir", $finetuneOutputDir
     )
+    if ($useContrastiveCheckpoint) {
+        $finetuneArgs += @("--contrastive-checkpoint", $contrastiveCheckpoint)
+    }
     if ($FinetuneEpochs -gt 0) {
         $finetuneArgs += "--epochs"
         $finetuneArgs += $FinetuneEpochs.ToString()
@@ -150,13 +202,21 @@ foreach ($foldDir in $foldDirs) {
         $finetuneArgs += "--force-cpu"
     }
 
-    Write-Host ("[" + $foldName + "] finetune")
+    if ($useContrastiveCheckpoint) {
+        Write-Host ("[" + $displayFoldName + "] using contrastive checkpoint: " + $contrastiveCheckpoint)
+    }
+    elseif ($SkipContrastive) {
+        Write-Host ("[" + $displayFoldName + "] no contrastive checkpoint found; finetuning from random initialization")
+    }
+
+    Write-Host ("[" + $displayFoldName + "] finetune")
     & $python @finetuneArgs
 }
 
 Write-Host "Summarizing LOSO finetune metrics..."
 $summaryRows = @()
 foreach ($foldDir in (Get-ChildItem -Path $finetuneRoot -Directory | Where-Object { $_.Name -like "fold_*" } | Sort-Object Name)) {
+    $displayFoldName = $foldNameMap[$foldDir.Name]
     $metricsPath = Join-Path $foldDir.FullName "test_metrics.json"
     if (!(Test-Path $metricsPath)) {
         continue
@@ -164,7 +224,8 @@ foreach ($foldDir in (Get-ChildItem -Path $finetuneRoot -Directory | Where-Objec
 
     $metrics = Get-Content -Path $metricsPath -Raw | ConvertFrom-Json
     $summaryRows += [pscustomobject]@{
-        fold         = $foldDir.Name
+        fold         = $displayFoldName
+        fold_dir     = $foldDir.Name
         accuracy     = Get-MetricValue -Metrics $metrics -Name "accuracy"
         accuracy_std = Get-MetricValue -Metrics $metrics -Name "accuracy_std"
         macro_f1     = Get-MetricValue -Metrics $metrics -Name "macro_f1"
@@ -183,6 +244,7 @@ $lossValues = @($summaryRows | ForEach-Object { [double]$_.loss })
 
 $summaryRows += [pscustomobject]@{
     fold         = "CROSS_FOLD_MEAN_STD"
+    fold_dir     = ""
     accuracy     = Get-MeanValue -Values $accuracyValues
     accuracy_std = Get-StdValue -Values $accuracyValues
     macro_f1     = Get-MeanValue -Values $macroF1Values
@@ -196,6 +258,6 @@ $summaryRows | Format-Table -AutoSize | Out-String | Write-Host
 
 $aggregate = $summaryRows | Where-Object { $_.fold -eq "CROSS_FOLD_MEAN_STD" } | Select-Object -First 1
 Write-Host "---"
-Write-Host ([string]::Format("Cross-fold accuracy: {0:F4} ± {1:F4}", $aggregate.accuracy, $aggregate.accuracy_std))
-Write-Host ([string]::Format("Cross-fold macro_f1: {0:F4} ± {1:F4}", $aggregate.macro_f1, $aggregate.macro_f1_std))
+Write-Host ([string]::Format("Cross-fold accuracy: {0:F4} ({1:F4})", $aggregate.accuracy, $aggregate.accuracy_std))
+Write-Host ([string]::Format("Cross-fold macro_f1: {0:F4} ({1:F4})", $aggregate.macro_f1, $aggregate.macro_f1_std))
 Write-Host ("Saved summary to " + $summaryPath)

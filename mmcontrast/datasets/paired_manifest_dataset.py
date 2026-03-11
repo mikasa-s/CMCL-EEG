@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
+from collections import OrderedDict
 import numpy as np
 import pandas as pd
 import torch
@@ -41,6 +42,7 @@ class PairedEEGfMRIDataset(Dataset):
         fmri_normalize_nonzero_only: bool = True,
         require_eeg: bool = True,
         require_fmri: bool = True,
+        subject_pack_cache_size: int = 2,
     ) -> None:
         self.root_dir = Path(root_dir) if root_dir else None
         self.normalize_eeg = normalize_eeg
@@ -55,6 +57,8 @@ class PairedEEGfMRIDataset(Dataset):
         self.fmri_normalize_nonzero_only = bool(fmri_normalize_nonzero_only)
         self.require_eeg = require_eeg
         self.require_fmri = require_fmri
+        self.subject_pack_cache_size = max(0, int(subject_pack_cache_size))
+        self._subject_pack_cache: OrderedDict[str, dict[str, np.ndarray]] = OrderedDict()
 
         self.df = pd.read_csv(manifest_csv)
         self.subject_packed = "subject_path" in self.df.columns
@@ -94,7 +98,7 @@ class PairedEEGfMRIDataset(Dataset):
         """统一读取 npy、npz、pt 三种常见存储格式。"""
         suffix = path.suffix.lower()
         if suffix == ".npy":
-            arr = np.load(path)
+            arr = np.load(path, mmap_mode="r")
         elif suffix == ".npz":
             arr = np.load(path)["arr_0"]
         elif suffix == ".pt":
@@ -105,14 +109,31 @@ class PairedEEGfMRIDataset(Dataset):
                 raise ValueError(f"Unsupported .pt payload for {path}")
         else:
             raise ValueError(f"Unsupported file suffix {suffix} for {path}")
-        return arr.astype(np.float32)
+        return arr.astype(np.float32, copy=False)
 
     def _load_subject_pack(self, path: Path) -> dict[str, np.ndarray]:
         suffix = path.suffix.lower()
-        if suffix != ".npz":
-            raise ValueError(f"Subject-packed files must be .npz, got {suffix} for {path}")
-        with np.load(path, allow_pickle=False) as data:
-            return {key: data[key] for key in data.files}
+        cache_key = str(path)
+        if self.subject_pack_cache_size > 0 and cache_key in self._subject_pack_cache:
+            cached = self._subject_pack_cache.pop(cache_key)
+            self._subject_pack_cache[cache_key] = cached
+            return cached
+
+        if path.is_dir():
+            pack = {}
+            for array_path in sorted(path.glob("*.npy")):
+                pack[array_path.stem] = np.load(array_path, mmap_mode="r", allow_pickle=False)
+        elif suffix == ".npz":
+            with np.load(path, allow_pickle=False) as data:
+                pack = {key: data[key] for key in data.files}
+        else:
+            raise ValueError(f"Subject-packed files must be a directory of .npy files or a legacy .npz file, got {path}")
+
+        if self.subject_pack_cache_size > 0:
+            self._subject_pack_cache[cache_key] = pack
+            while len(self._subject_pack_cache) > self.subject_pack_cache_size:
+                self._subject_pack_cache.popitem(last=False)
+        return pack
 
     @staticmethod
     def _zscore(x: np.ndarray) -> np.ndarray:

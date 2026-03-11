@@ -5,19 +5,31 @@ import concurrent.futures
 from dataclasses import dataclass
 from fractions import Fraction
 from pathlib import Path
-from typing import Iterable, Sequence
+from typing import Iterable
 
-import nibabel as nib
 import numpy as np
 import pandas as pd
-from nilearn.datasets import fetch_atlas_schaefer_2018
-from nilearn.maskers import NiftiLabelsMasker
 from scipy.io import loadmat
-from scipy.ndimage import zoom
 from scipy.signal import butter, resample_poly, sosfiltfilt
 from tqdm import tqdm
 
-from split_utils import write_loso_splits, write_subject_splits
+from preprocess_common import (
+    add_atlas_args,
+    add_common_fmri_args,
+    add_dataset_io_args,
+    add_eeg_patch_args,
+    add_subject_args,
+    add_subject_packing_and_split_args,
+    extract_roi_timeseries,
+    find_subjects,
+    get_atlas_labels_img,
+    load_bold_volume,
+    preprocess_fmri_volume,
+    stack_subject_samples,
+    write_subject_memmap_pack,
+    write_loso_splits,
+    write_subject_splits,
+)
 
 
 DOT_DIRECTION_LABELS = {
@@ -81,14 +93,8 @@ class SubjectPreparationResult:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Prepare ds002739 EEG/fMRI pairs with normalized NeuroSTORM-style volume preprocessing.")
-    parser.add_argument("--ds-root", type=Path, required=True, help="Path to ds002739 root.")
-    parser.add_argument("--output-root", type=Path, required=True, help="Output directory for exported arrays and manifests.")
-    parser.add_argument(
-        "--subjects",
-        nargs="+",
-        default=None,
-        help="Optional subject IDs such as sub-01. Defaults to all subjects found under ds-root.",
-    )
+    add_dataset_io_args(parser, ds_root_help="Path to ds002739 root.", output_root_help="Output directory for exported arrays and manifests.")
+    add_subject_args(parser, subject_example="sub-01")
     parser.add_argument(
         "--runs",
         nargs="+",
@@ -130,97 +136,35 @@ def parse_args() -> argparse.Namespace:
         default=1.0,
         help="Minimum usable window length. Shorter windows are skipped.",
     )
-    parser.add_argument(
-        "--atlas-labels-img",
-        type=Path,
-        default=None,
-        help="Optional path to a labels atlas image in MNI space. If omitted, Schaefer atlas is fetched.",
+    add_atlas_args(parser)
+    add_common_fmri_args(
+        parser,
+        default_fmri_mode="volume",
+        tr_help="Target fMRI repetition time in seconds after preprocessing.",
+        standardize_help="Apply standardization inside the ROI masker when fmri-mode=roi.",
+        fmri_max_shape_help="Maximum center-cropped spatial shape after resampling. Dimensions smaller than this are not padded during preprocessing.",
     )
-    parser.add_argument("--atlas-name", default="schaefer", choices=["schaefer"], help="Built-in atlas preset.")
-    parser.add_argument("--n-rois", type=int, default=400, help="ROI count for the built-in Schaefer atlas.")
-    parser.add_argument("--tr", type=float, default=2.0, help="Target fMRI repetition time in seconds after preprocessing.")
-    parser.add_argument(
-        "--fmri-mode",
-        default="volume",
-        choices=["roi", "volume"],
-        help="roi saves [ROI,T]; volume saves normalized 4D windows [H,W,D,T].",
-    )
-    parser.add_argument(
-        "--fmri-voxel-size",
-        nargs=3,
-        type=float,
-        default=[2.0, 2.0, 2.0],
-        help="Target spatial voxel size in mm for fMRI preprocessing.",
-    )
-    parser.add_argument(
-        "--fmri-max-shape",
-        nargs=3,
-        type=int,
-        default=[48, 48, 48],
-        help="Maximum center-cropped spatial shape after resampling. Dimensions smaller than this are not padded during preprocessing.",
-    )
-    parser.add_argument(
-        "--fmri-float16",
-        action="store_true",
-        help="Save preprocessed fMRI windows as float16. Default saves float32.",
-    )
-    parser.add_argument(
-        "--eeg-mode",
-        default="patched",
-        choices=["continuous", "patched"],
-        help="continuous saves [C,T]; patched saves [C,S,P] for direct use by the default dataset.",
+    add_eeg_patch_args(
+        parser,
+        default_eeg_mode="patched",
+        default_seq_len=20,
+        default_patch_len=200,
+        seq_len_help="EEG patch count when eeg-mode=patched.",
+        patch_len_help="EEG patch length when eeg-mode=patched.",
     )
     parser.add_argument("--eeg-target-sfreq", type=float, default=200.0, help="Target EEG sampling rate in Hz.")
     parser.add_argument("--eeg-lfreq", type=float, default=0.5, help="EEG band-pass low cutoff in Hz.")
     parser.add_argument("--eeg-hfreq", type=float, default=40.0, help="EEG band-pass high cutoff in Hz.")
-    parser.add_argument("--eeg-seq-len", type=int, default=20, help="EEG patch count when eeg-mode=patched.")
-    parser.add_argument("--eeg-patch-len", type=int, default=200, help="EEG patch length when eeg-mode=patched.")
-    parser.add_argument(
-        "--standardize-fmri",
-        action="store_true",
-        help="Apply standardization inside the ROI masker when fmri-mode=roi.",
+    add_subject_packing_and_split_args(
+        parser,
+        pack_help="Pack all runs of the same subject into one directory of memmap-friendly NPY files with arrays stacked along axis 0.",
+        split_help="Optional split generation after preprocessing. subject writes train/val/test manifests; loso writes per-fold manifests.",
+        train_subjects=21,
+        val_subjects=2,
+        test_subjects=1,
     )
-    parser.add_argument(
-        "--pack-subject-files",
-        action="store_true",
-        help="Pack all runs of the same subject into one NPZ file with arrays stacked along axis 0.",
-    )
-    parser.add_argument(
-        "--split-mode",
-        default="loso",
-        choices=["none", "subject", "loso"],
-        help="Optional split generation after preprocessing. subject writes train/val/test manifests; loso writes per-fold manifests.",
-    )
-    parser.add_argument(
-        "--split-output-dir",
-        type=Path,
-        default=None,
-        help="Optional directory for generated split manifests. Defaults to <output-root>/splits_subjectwise or <output-root>/loso_subjectwise.",
-    )
-    parser.add_argument("--train-subjects", type=int, default=21, help="Number of subjects in train split when --split-mode=subject.")
-    parser.add_argument("--val-subjects", type=int, default=2, help="Number of subjects in val split or LOSO validation subjects.")
-    parser.add_argument("--test-subjects", type=int, default=1, help="Number of subjects in test split when --split-mode=subject.")
     parser.add_argument("--num-workers", type=int, default=1, help="Number of subject-level worker processes. Use 1 to keep processing serial.")
     return parser.parse_args()
-
-
-def find_subjects(ds_root: Path, requested_subjects: list[str] | None) -> list[str]:
-    if requested_subjects:
-        return requested_subjects
-    return sorted(path.name for path in ds_root.glob("sub-*") if path.is_dir())
-
-
-def get_atlas_labels_img(args: argparse.Namespace, atlas_cache_dir: Path) -> str:
-    if args.atlas_labels_img is not None:
-        return str(args.atlas_labels_img)
-    atlas_cache_dir.mkdir(parents=True, exist_ok=True)
-    atlas = fetch_atlas_schaefer_2018(
-        n_rois=args.n_rois,
-        yeo_networks=7,
-        resolution_mm=2,
-        data_dir=str(atlas_cache_dir),
-    )
-    return str(atlas.maps)
 
 
 def load_mat_payload(path: Path) -> dict:
@@ -384,65 +328,6 @@ def preprocess_eeg(data: np.ndarray, source_sfreq: float, args: argparse.Namespa
     return downsampled.astype(np.float32), float(args.eeg_target_sfreq)
 
 
-def extract_roi_timeseries(
-    fmri_nii_path: Path,
-    labels_img: str,
-    tr: float,
-    standardize_fmri: bool,
-) -> tuple[np.ndarray, tuple[int, ...], tuple[float, ...]]:
-    img = nib.load(str(fmri_nii_path))
-    masker = NiftiLabelsMasker(labels_img=labels_img, standardize=standardize_fmri, detrend=True, t_r=tr)
-    series = masker.fit_transform(img).T.astype(np.float32)
-    return series, tuple(int(dim) for dim in img.shape), tuple(float(dim) for dim in img.header.get_zooms())
-
-
-def load_bold_volume(fmri_nii_path: Path) -> tuple[np.ndarray, tuple[int, ...], tuple[float, ...]]:
-    img = nib.load(str(fmri_nii_path))
-    volume = np.asarray(img.get_fdata(dtype=np.float32), dtype=np.float32)
-    return volume, tuple(int(dim) for dim in img.shape), tuple(float(dim) for dim in img.header.get_zooms())
-
-
-def spatial_resample_volume(data: np.ndarray, voxel_size: Sequence[float], target_voxel_size: Sequence[float]) -> np.ndarray:
-    if data.ndim != 4:
-        raise ValueError(f"Expected 4D BOLD volume [H,W,D,T], got {data.shape}")
-    scale_factors = tuple(float(current) / float(target) for current, target in zip(voxel_size[:3], target_voxel_size[:3]))
-    return zoom(data, zoom=(scale_factors[0], scale_factors[1], scale_factors[2], 1.0), order=1).astype(np.float32)
-
-
-def temporal_resample_volume(data: np.ndarray, source_tr: float, target_tr: float) -> np.ndarray:
-    if data.ndim != 4:
-        raise ValueError(f"Expected 4D BOLD volume [H,W,D,T], got {data.shape}")
-    if abs(source_tr - target_tr) < 1e-6:
-        return data.astype(np.float32)
-    target_t = max(1, int(round(data.shape[3] * float(source_tr) / float(target_tr))))
-    return zoom(data, zoom=(1.0, 1.0, 1.0, target_t / max(data.shape[3], 1)), order=1).astype(np.float32)
-
-
-def center_crop_spatial_max(data: np.ndarray, max_shape: Sequence[int]) -> np.ndarray:
-    if data.ndim != 4:
-        raise ValueError(f"Expected 4D BOLD volume [H,W,D,T], got {data.shape}")
-    slices: list[slice] = []
-    for axis, max_size in enumerate(max_shape[:3]):
-        current_size = data.shape[axis]
-        if current_size > int(max_size):
-            start = (current_size - int(max_size)) // 2
-            end = start + int(max_size)
-            slices.append(slice(start, end))
-        else:
-            slices.append(slice(0, current_size))
-    slices.append(slice(None))
-    return data[tuple(slices)].astype(np.float32)
-
-
-def preprocess_fmri_volume(data: np.ndarray, voxel_size: Sequence[float], source_tr: float, args: argparse.Namespace) -> np.ndarray:
-    output = spatial_resample_volume(data, voxel_size=voxel_size, target_voxel_size=args.fmri_voxel_size)
-    output = temporal_resample_volume(output, source_tr=source_tr, target_tr=args.tr)
-    output = center_crop_spatial_max(output, max_shape=args.fmri_max_shape)
-    if args.fmri_float16:
-        return output.astype(np.float16)
-    return output.astype(np.float32)
-
-
 def get_run_ids(func_dir: Path, requested_runs: list[str] | None) -> list[str]:
     if requested_runs is not None:
         return requested_runs
@@ -574,18 +459,6 @@ def build_sample_record(
     )
 
 
-def stack_subject_samples(samples: list[np.ndarray], name: str) -> np.ndarray:
-    if not samples:
-        raise ValueError(f"No {name} samples available for subject packing.")
-    first_shape = tuple(samples[0].shape)
-    for sample in samples[1:]:
-        if tuple(sample.shape) != first_shape:
-            raise ValueError(
-                f"Cannot pack subject-level {name} arrays with inconsistent shapes: {first_shape} vs {tuple(sample.shape)}"
-            )
-    return np.stack(samples, axis=0)
-
-
 def iter_subject_runs(subjects: Iterable[str], ds_root: Path, requested_runs: list[str] | None) -> Iterable[tuple[str, str]]:
     for subject in subjects:
         func_dir = ds_root / subject / "func"
@@ -640,10 +513,19 @@ def prepare_subject(
                 labels_img=labels_img,
                 tr=args.tr,
                 standardize_fmri=args.standardize_fmri,
+                include_metadata=True,
             )
         else:
-            raw_fmri, bold_shape, voxel_size = load_bold_volume(bold_path)
-            fmri_source = preprocess_fmri_volume(raw_fmri, voxel_size=voxel_size, source_tr=float(voxel_size[3]), args=args)
+            raw_fmri, bold_shape, voxel_size = load_bold_volume(bold_path, include_metadata=True)
+            fmri_source = preprocess_fmri_volume(
+                raw_fmri,
+                voxel_size=voxel_size,
+                source_tr=float(voxel_size[3]),
+                target_voxel_size=args.fmri_voxel_size,
+                target_tr=float(args.tr),
+                max_shape=args.fmri_max_shape,
+                use_float16=bool(args.fmri_float16),
+            )
 
         pair_count = min(len(eeg_trials), len(fmri_events))
         if pair_count == 0:
@@ -764,15 +646,16 @@ def prepare_subject(
         packed_runs_array = np.asarray(packed_runs)
         packed_sample_ids_array = np.asarray(packed_sample_ids)
 
-        subject_path = packed_out_dir / f"{subject}.npz"
-        np.savez(
-            subject_path,
-            eeg=packed_eeg,
-            fmri=packed_fmri,
-            labels=packed_labels_array,
-            trial_index=packed_trial_indices_array,
-            run=packed_runs_array,
-            sample_id=packed_sample_ids_array,
+        subject_path = write_subject_memmap_pack(
+            packed_out_dir / subject,
+            {
+                "eeg": packed_eeg,
+                "fmri": packed_fmri,
+                "labels": packed_labels_array,
+                "trial_index": packed_trial_indices_array,
+                "run": packed_runs_array,
+                "sample_id": packed_sample_ids_array,
+            },
         )
         subject_record = SubjectRecord(
             subject=subject,
@@ -818,7 +701,7 @@ def main() -> None:
         eeg_out_dir.mkdir(parents=True, exist_ok=True)
         fmri_out_dir.mkdir(parents=True, exist_ok=True)
 
-    labels_img = get_atlas_labels_img(args, atlas_cache_dir) if args.fmri_mode == "roi" else ""
+    labels_img = get_atlas_labels_img(args.atlas_labels_img, atlas_cache_dir, args.n_rois) if args.fmri_mode == "roi" else ""
     subjects = find_subjects(ds_root, args.subjects)
     electrode_template = load_electrode_template(ds_root)
     common_electrodes = compute_common_electrodes(ds_root, subjects, args.runs, electrode_template)

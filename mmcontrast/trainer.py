@@ -137,6 +137,7 @@ class ContrastiveTrainer:
             num_workers=num_workers,
             pin_memory=pin_memory,
             drop_last=drop_last,
+            persistent_workers=num_workers > 0,
         )
 
     def build_optional_eval_loader(self, data_cfg: dict[str, Any], train_cfg: dict[str, Any], split: str):

@@ -27,12 +27,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--root-dir", type=str, default="")
     parser.add_argument("--output-dir", type=str, default="")
     parser.add_argument("--contrastive-checkpoint", type=str, default="")
+    parser.add_argument("--finetune-checkpoint", type=str, default="")
     parser.add_argument("--selection-metric", type=str, default="")
     parser.add_argument("--epochs", type=int, default=None)
     parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument("--eval-batch-size", type=int, default=None)
     parser.add_argument("--num-workers", type=int, default=None)
     parser.add_argument("--lr", type=float, default=None)
+    parser.add_argument("--test-only", action="store_true")
     parser.add_argument("--force-cpu", action="store_true")
     parser.add_argument(
         "--set",
@@ -71,6 +73,7 @@ def apply_overrides(config: dict, args: argparse.Namespace) -> dict:
         ("data.root_dir", args.root_dir.strip()),
         ("finetune.output_dir", args.output_dir.strip()),
         ("finetune.contrastive_checkpoint_path", args.contrastive_checkpoint.strip()),
+        ("finetune.eval_checkpoint_path", args.finetune_checkpoint.strip()),
         ("finetune.selection_metric", args.selection_metric.strip()),
         ("finetune.epochs", args.epochs),
         ("train.batch_size", args.batch_size),
@@ -85,6 +88,9 @@ def apply_overrides(config: dict, args: argparse.Namespace) -> dict:
 
     if args.force_cpu:
         assign_nested_value(config, "train.force_cpu", True)
+
+    if args.test_only:
+        assign_nested_value(config, "finetune.test_only", True)
 
     for override in args.overrides:
         if "=" not in override:

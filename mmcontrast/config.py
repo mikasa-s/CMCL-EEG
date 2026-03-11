@@ -51,6 +51,22 @@ def _load_array_shape(sample_path: Path) -> tuple[int, ...]:
     raise ValueError(f"Unsupported sample format for shape validation: {sample_path}")
 
 
+def _load_subject_pack_array_shape(subject_path: Path, array_name: str) -> tuple[int, ...] | None:
+    if subject_path.is_dir():
+        array_path = subject_path / f"{array_name}.npy"
+        if array_path.exists():
+            return tuple(np.load(array_path, mmap_mode="r", allow_pickle=False).shape)
+        return None
+
+    if subject_path.suffix.lower() == ".npz":
+        with np.load(subject_path, allow_pickle=False) as data:
+            if array_name in data:
+                return tuple(data[array_name].shape)
+        return None
+
+    raise ValueError(f"Unsupported subject-packed format for shape validation: {subject_path}")
+
+
 def _resolve_sample_shapes(manifest_path: Path, root_dir: Path | None) -> tuple[tuple[int, ...] | None, tuple[int, ...] | None]:
     """从 manifest 的首行样本解析 EEG/fMRI 形状。"""
     with open(manifest_path, "r", encoding="utf-8", newline="") as handle:
@@ -66,13 +82,14 @@ def _resolve_sample_shapes(manifest_path: Path, root_dir: Path | None) -> tuple[
     if (eeg_shape is None or fmri_shape is None) and first_row.get("subject_path"):
         subject_path = Path(first_row["subject_path"])
         subject_path = subject_path if subject_path.is_absolute() else (root_dir / subject_path if root_dir else manifest_path.parent / subject_path)
-        with np.load(subject_path, allow_pickle=False) as data:
-            if eeg_shape is None and "eeg" in data:
-                eeg_data = data["eeg"]
-                eeg_shape = tuple(int(dim) for dim in eeg_data.shape[1:]) if eeg_data.ndim >= 2 else tuple(int(dim) for dim in eeg_data.shape)
-            if fmri_shape is None and "fmri" in data:
-                fmri_data = data["fmri"]
-                fmri_shape = tuple(int(dim) for dim in fmri_data.shape[1:]) if fmri_data.ndim >= 2 else tuple(int(dim) for dim in fmri_data.shape)
+        if eeg_shape is None:
+            eeg_pack_shape = _load_subject_pack_array_shape(subject_path, "eeg")
+            if eeg_pack_shape is not None:
+                eeg_shape = tuple(int(dim) for dim in eeg_pack_shape[1:]) if len(eeg_pack_shape) >= 2 else tuple(int(dim) for dim in eeg_pack_shape)
+        if fmri_shape is None:
+            fmri_pack_shape = _load_subject_pack_array_shape(subject_path, "fmri")
+            if fmri_pack_shape is not None:
+                fmri_shape = tuple(int(dim) for dim in fmri_pack_shape[1:]) if len(fmri_pack_shape) >= 2 else tuple(int(dim) for dim in fmri_pack_shape)
 
     if eeg_shape is None and first_row.get("eeg_path"):
         eeg_path = Path(first_row["eeg_path"])
