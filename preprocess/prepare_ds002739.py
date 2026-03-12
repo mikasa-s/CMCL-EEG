@@ -15,6 +15,7 @@ from tqdm import tqdm
 
 from preprocess_common import (
     add_atlas_args,
+    build_canonical_subject_map,
     add_common_fmri_args,
     add_dataset_io_args,
     add_eeg_patch_args,
@@ -24,12 +25,18 @@ from preprocess_common import (
     extract_roi_timeseries,
     find_subjects,
     get_atlas_labels_img,
+    load_target_channel_names,
     load_bold_volume,
+    make_channel_metadata_rows,
+    make_subject_uid,
     preprocess_fmri_volume,
     prepare_training_ready_eeg,
     prepare_training_ready_fmri,
+    reorder_eeg_channels,
     stack_subject_samples,
+    write_channel_metadata,
     write_subject_memmap_pack,
+    write_subject_mapping,
     write_loso_splits,
     write_subject_splits,
 )
@@ -46,7 +53,10 @@ DOT_DIRECTION_LABELS = {
 @dataclass(frozen=True)
 class SampleRecord:
     sample_id: str
+    dataset: str
     subject: str
+    subject_uid: str
+    original_subject: str
     task: str
     run: str
     trial_type: str
@@ -63,7 +73,10 @@ class SampleRecord:
 
 @dataclass(frozen=True)
 class SubjectRecord:
+    dataset: str
     subject: str
+    subject_uid: str
+    original_subject: str
     subject_path: str
     sample_count: int
     eeg_shape: str
@@ -161,6 +174,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--eeg-target-sfreq", type=float, default=200.0, help="Target EEG sampling rate in Hz.")
     parser.add_argument("--eeg-lfreq", type=float, default=0.5, help="EEG band-pass low cutoff in Hz.")
     parser.add_argument("--eeg-hfreq", type=float, default=40.0, help="EEG band-pass high cutoff in Hz.")
+    parser.add_argument(
+        "--target-channel-manifest",
+        type=Path,
+        default=None,
+        help="Optional channel manifest from joint pretraining. When provided, EEG channels are remapped to that exact normalized channel order.",
+    )
     add_subject_packing_and_split_args(
         parser,
         pack_help="Pack all runs of the same subject into one directory of memmap-friendly NPY files with arrays stacked along axis 0.",
@@ -250,7 +269,7 @@ def save_common_electrode_manifest(out_root: Path, electrode_template: list[str]
     pd.DataFrame(rows).to_csv(out_root / "eeg_channel_intersection.csv", index=False)
 
 
-def load_eeg_data(eeg_mat_path: Path, electrode_template: list[str], common_electrodes: list[str]) -> tuple[np.ndarray, float]:
+def load_eeg_data(eeg_mat_path: Path, electrode_template: list[str]) -> tuple[np.ndarray, float, list[str]]:
     payload = load_mat_payload(eeg_mat_path)
     eeg_struct = payload["EEGdata"]
     eeg = np.asarray(eeg_struct.Y, dtype=np.float32)
@@ -263,12 +282,7 @@ def load_eeg_data(eeg_mat_path: Path, electrode_template: list[str], common_elec
         raise ValueError(
             f"EEG channel count mismatch for {eeg_mat_path}: data has {eeg.shape[0]} channels, but template minus excludedchannels yields {len(kept_electrodes)}"
         )
-    kept_index_by_name = {name: index for index, name in enumerate(kept_electrodes)}
-    missing = [name for name in common_electrodes if name not in kept_index_by_name]
-    if missing:
-        raise ValueError(f"Shared EEG electrodes missing in {eeg_mat_path}: {missing}")
-    selected_indices = [kept_index_by_name[name] for name in common_electrodes]
-    return eeg[selected_indices].astype(np.float32), sfreq
+    return eeg.astype(np.float32), sfreq, kept_electrodes
 
 
 def load_eeg_events(events_mat_path: Path) -> dict[str, np.ndarray]:
@@ -437,7 +451,10 @@ def resolve_eeg_patch_params(args: argparse.Namespace) -> tuple[int, int]:
 
 def build_sample_record(
     sample_id: str,
+    dataset: str,
     subject: str,
+    subject_uid: str,
+    original_subject: str,
     run: str,
     trial_type: str,
     eeg_rel_path: Path,
@@ -452,7 +469,10 @@ def build_sample_record(
 ) -> SampleRecord:
     return SampleRecord(
         sample_id=sample_id,
+        dataset=dataset,
         subject=subject,
+        subject_uid=subject_uid,
+        original_subject=original_subject,
         task="main",
         run=run,
         trial_type=trial_type,
@@ -477,11 +497,13 @@ def iter_subject_runs(subjects: Iterable[str], ds_root: Path, requested_runs: li
 
 def prepare_subject(
     subject: str,
+    canonical_subject: str,
+    subject_uid: str,
     ds_root: Path,
     out_root: Path,
     requested_runs: list[str] | None,
     electrode_template: list[str],
-    common_electrodes: list[str],
+    target_channel_names: list[str],
     labels_img: str,
     args: argparse.Namespace,
 ) -> SubjectPreparationResult:
@@ -508,7 +530,8 @@ def prepare_subject(
         if not all(path.exists() for path in [bold_path, fmri_events_path, eeg_data_path, eeg_events_path]):
             continue
 
-        raw_eeg_data, raw_sfreq = load_eeg_data(eeg_data_path, electrode_template=electrode_template, common_electrodes=common_electrodes)
+        raw_eeg_data, raw_sfreq, kept_electrodes = load_eeg_data(eeg_data_path, electrode_template=electrode_template)
+        raw_eeg_data, _ = reorder_eeg_channels(raw_eeg_data, kept_electrodes, target_channel_names)
         eeg_data, processed_sfreq = preprocess_eeg(raw_eeg_data, source_sfreq=raw_sfreq, args=args)
         eeg_events = load_eeg_events(eeg_events_path)
         eeg_trials = build_eeg_trial_table(eeg_events)
@@ -564,12 +587,13 @@ def prepare_subject(
 
         eeg_onsets = eeg_trials["eeg_onset_sec"].to_numpy(dtype=np.float64)
         fmri_onsets = fmri_events["onset"].to_numpy(dtype=np.float64)
+        aligned_eeg_onsets = fmri_onsets + float(eeg_fmri_offset_sec)
         for event_index, trial_row in eeg_trials.iterrows():
             trial_type = "dot_stim_validtrials"
             label = int(trial_row["label"])
             label_name = str(trial_row["label_name"])
             eeg_window_length_sec = compute_event_window_sec(
-                eeg_onsets,
+                aligned_eeg_onsets,
                 event_index=event_index,
                 max_window_sec=float(args.eeg_window_sec) if args.eeg_window_sec is not None else float(args.window_sec),
                 margin_sec=float(args.window_margin_sec),
@@ -585,8 +609,8 @@ def prepare_subject(
             if eeg_window_length_sec is None or fmri_window_length_sec is None:
                 continue
 
-            eeg_onset_sec = float(trial_row["eeg_onset_sec"])
             fmri_onset_sec = float(fmri_events.iloc[event_index]["onset"])
+            eeg_onset_sec = float(aligned_eeg_onsets[event_index])
 
             try:
                 eeg_window = slice_eeg_window(
@@ -617,7 +641,7 @@ def prepare_subject(
             except ValueError:
                 continue
 
-            sample_id = f"{subject}_{run}_trial_{int(trial_row['trial_index']):03d}_{label_name}"
+            sample_id = f"ds002739_{canonical_subject}_{run}_trial_{int(trial_row['trial_index']):03d}_{label_name}"
 
             if args.pack_subject_files:
                 packed_eeg_samples.append(eeg_window.astype(np.float32))
@@ -635,7 +659,10 @@ def prepare_subject(
                 records.append(
                     build_sample_record(
                         sample_id=sample_id,
-                        subject=subject,
+                        dataset="ds002739",
+                        subject=canonical_subject,
+                        subject_uid=subject_uid,
+                        original_subject=subject,
                         run=run,
                         trial_type=trial_type,
                         eeg_rel_path=eeg_out_path.relative_to(out_root),
@@ -660,7 +687,7 @@ def prepare_subject(
         packed_sample_ids_array = np.asarray(packed_sample_ids)
 
         subject_path = write_subject_memmap_pack(
-            packed_out_dir / subject,
+            packed_out_dir / subject_uid,
             {
                 "eeg": packed_eeg,
                 "fmri": packed_fmri,
@@ -671,7 +698,10 @@ def prepare_subject(
             },
         )
         subject_record = SubjectRecord(
-            subject=subject,
+            dataset="ds002739",
+            subject=canonical_subject,
+            subject_uid=subject_uid,
+            original_subject=subject,
             subject_path=subject_path.relative_to(out_root).as_posix(),
             sample_count=int(packed_labels_array.shape[0]),
             eeg_shape="x".join(str(dim) for dim in packed_eeg.shape),
@@ -717,13 +747,34 @@ def main() -> None:
 
     labels_img = get_atlas_labels_img(args.atlas_labels_img, atlas_cache_dir, args.n_rois) if args.fmri_mode == "roi" else ""
     subjects = find_subjects(ds_root, args.subjects)
+    canonical_subject_map = build_canonical_subject_map(subjects)
     electrode_template = load_electrode_template(ds_root)
-    common_electrodes = compute_common_electrodes(ds_root, subjects, args.runs, electrode_template)
-    save_common_electrode_manifest(out_root, electrode_template, common_electrodes)
-    print(f"Using {len(common_electrodes)} shared EEG electrodes across selected files.")
+    target_channel_names = load_target_channel_names(args.target_channel_manifest.resolve()) if args.target_channel_manifest is not None else None
+    if target_channel_names is None:
+        target_channel_names = compute_common_electrodes(ds_root, subjects, args.runs, electrode_template)
+    save_common_electrode_manifest(out_root, electrode_template, target_channel_names)
+    print(f"Using {len(target_channel_names)} EEG channels for ds002739 export.")
     records: list[SampleRecord] = []
     subject_records: list[SubjectRecord] = []
     summaries: list[RunSummary] = []
+    subject_mapping_rows = [
+        {
+            "dataset": "ds002739",
+            "original_subject": subject,
+            "subject": canonical_subject_map[subject],
+            "subject_uid": make_subject_uid("ds002739", canonical_subject_map[subject]),
+        }
+        for subject in subjects
+    ]
+    channel_metadata_rows = make_channel_metadata_rows("ds002739", electrode_template)
+    channel_mapping_rows: list[dict[str, object]] = [
+        {
+            "dataset": "ds002739",
+            "target_channel_index": index,
+            "target_channel_name": channel_name,
+        }
+        for index, channel_name in enumerate(target_channel_names)
+    ]
     max_workers = min(int(args.num_workers), max(len(subjects), 1))
     if max_workers > 1 and len(subjects) > 1:
         print(f"Preparing ds002739 with {max_workers} worker processes.")
@@ -733,11 +784,13 @@ def main() -> None:
                 executor.submit(
                     prepare_subject,
                     subject,
+                    canonical_subject_map[subject],
+                    make_subject_uid("ds002739", canonical_subject_map[subject]),
                     ds_root,
                     out_root,
                     args.runs,
                     electrode_template,
-                    common_electrodes,
+                    target_channel_names,
                     labels_img,
                     args,
                 ): subject
@@ -749,11 +802,13 @@ def main() -> None:
         subject_results = [
             prepare_subject(
                 subject,
+                canonical_subject_map[subject],
+                make_subject_uid("ds002739", canonical_subject_map[subject]),
                 ds_root,
                 out_root,
                 args.runs,
                 electrode_template,
-                common_electrodes,
+                target_channel_names,
                 labels_img,
                 args,
             )
@@ -775,6 +830,9 @@ def main() -> None:
     else:
         pd.DataFrame(record.__dict__ for record in sorted(records, key=lambda item: item.sample_id)).to_csv(out_root / "manifest_all.csv", index=False)
     pd.DataFrame(summary.__dict__ for summary in sorted(summaries, key=lambda item: (item.subject, item.run))).to_csv(out_root / "run_summary.csv", index=False)
+    write_subject_mapping(subject_mapping_rows, out_root / "subject_mapping.csv")
+    write_channel_metadata(channel_metadata_rows, out_root / "eeg_channels_dataset.csv")
+    write_channel_metadata(channel_mapping_rows, out_root / "eeg_channel_mapping.csv")
 
     manifest_path = out_root / "manifest_all.csv"
     if args.split_mode == "subject":

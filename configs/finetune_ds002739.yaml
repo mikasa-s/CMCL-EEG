@@ -8,9 +8,9 @@ train:
   pin_memory: true
 
 data:
-  train_manifest_csv: cache/ds002739/loso_subjectwise/fold_sub-01/manifest_train.csv
-  val_manifest_csv: cache/ds002739/loso_subjectwise/fold_sub-01/manifest_val.csv
-  test_manifest_csv: cache/ds002739/loso_subjectwise/fold_sub-01/manifest_test.csv
+  train_manifest_csv: cache/ds002739/loso_subjectwise/fold_ds002739_sub01/manifest_train.csv
+  val_manifest_csv: cache/ds002739/loso_subjectwise/fold_ds002739_sub01/manifest_val.csv
+  test_manifest_csv: cache/ds002739/loso_subjectwise/fold_ds002739_sub01/manifest_test.csv
   root_dir: cache/ds002739
   preload_dataset: false
   expected_eeg_shape: [53, 2, 200]
@@ -54,7 +54,7 @@ fmri_model:
   freeze_backbone: false
 
 finetune:
-  output_dir: outputs/ds002739/finetune/fold_sub-01
+  output_dir: outputs/ds002739/finetune/fold_ds002739_sub01
   contrastive_checkpoint_path: ""
   num_classes: 2
   selection_metric: accuracy

@@ -12,6 +12,7 @@ param(
     [int]$EegPatchLen = 200,
     [bool]$DropEcg = $true,
     [bool]$TrainingReady = $true,
+    [string]$TargetChannelManifest = "",
     [ValidateSet("raw", "spm_unsmoothed", "spm_smoothed")]
     [string]$FmriSource = "spm_smoothed"
 )
@@ -75,6 +76,10 @@ if ($TrainingReady) {
 }
 else {
     $cliArgs += "--no-training-ready"
+}
+
+if ($TargetChannelManifest.Trim()) {
+    $cliArgs += @("--target-channel-manifest", $TargetChannelManifest)
 }
 
 if ($Subjects.Count -gt 0) {

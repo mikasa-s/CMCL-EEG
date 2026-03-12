@@ -11,9 +11,8 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, DistributedSampler
 
 from .datasets import PairedEEGfMRIDataset
-from .distributed import cleanup_distributed, configure_cudnn, configure_runtime_devices, gather_tensor, init_distributed, is_dist_initialized, is_main_process, runtime_summary
+from .distributed import cleanup_distributed, configure_cudnn, configure_runtime_devices, init_distributed, is_dist_initialized, is_main_process, runtime_summary
 from .losses import SymmetricInfoNCELoss
-from .metrics import contrastive_retrieval_metrics
 from .models import EEGfMRIContrastiveModel
 
 
@@ -41,7 +40,6 @@ class ContrastiveTrainer:
             num_workers=int(train_cfg.get("num_workers", 4)),
             pin_memory=bool(train_cfg.get("pin_memory", True)),
         )
-        self.val_loader = self.build_optional_eval_loader(data_cfg, train_cfg, split="val")
 
         self.model = self.build_model(cfg)
         if is_main_process():
@@ -73,7 +71,6 @@ class ContrastiveTrainer:
             weight_decay=float(train_cfg.get("weight_decay", 1e-4)),
         )
         self.epochs = int(train_cfg.get("epochs", 20))
-        self.eval_interval = int(train_cfg.get("eval_interval", 1))
         total_steps = max(1, self.epochs * len(self.train_loader))
         self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
             self.optimizer,
@@ -110,10 +107,9 @@ class ContrastiveTrainer:
         return path if path.is_absolute() else self.project_root / path
 
     def build_dataset(self, data_cfg: dict[str, Any], split: str) -> PairedEEGfMRIDataset:
-        """根据 split 选择对应 manifest，构建配对数据集。"""
+        """读取单一 manifest，构建配对数据集。"""
         dataset_cfg = dict(data_cfg)
-        manifest_key = f"{split}_manifest_csv"
-        manifest_path = dataset_cfg.get(manifest_key, dataset_cfg.get("manifest_csv", ""))
+        manifest_path = dataset_cfg.get("manifest_csv", dataset_cfg.get("train_manifest_csv", ""))
         dataset_cfg["manifest_csv"] = str(self.resolve_path(str(manifest_path)))
         if dataset_cfg.get("root_dir"):
             dataset_cfg["root_dir"] = str(self.resolve_path(str(dataset_cfg["root_dir"])))
@@ -136,21 +132,6 @@ class ContrastiveTrainer:
             pin_memory=pin_memory,
             drop_last=drop_last,
             persistent_workers=effective_num_workers > 0,
-        )
-
-    def build_optional_eval_loader(self, data_cfg: dict[str, Any], train_cfg: dict[str, Any], split: str):
-        """保留该辅助函数以兼容旧代码路径；当前对比学习阶段不使用评估 loader。"""
-        manifest_path = str(data_cfg.get(f"{split}_manifest_csv", "")).strip()
-        if not manifest_path:
-            return None
-        dataset = self.build_dataset(data_cfg, split=split)
-        return self.build_loader(
-            dataset,
-            batch_size=int(train_cfg.get("eval_batch_size", train_cfg.get("batch_size", 16))),
-            shuffle=False,
-            drop_last=False,
-            num_workers=int(train_cfg.get("num_workers", 4)),
-            pin_memory=bool(train_cfg.get("pin_memory", True)),
         )
 
     def build_model(self, cfg: dict[str, Any]) -> torch.nn.Module:
@@ -274,51 +255,15 @@ class ContrastiveTrainer:
         epoch_loss = running / max(1, len(self.train_loader))
         return epoch_loss, eeg_seconds, fmri_seconds
 
-    @torch.no_grad()
-    def evaluate(self, loader: DataLoader | None, split_name: str) -> dict[str, float] | None:
-        """在验证集或测试集上计算检索指标。"""
-        if loader is None:
-            return None
-
-        self.model.eval()
-        total_loss = 0.0
-        eeg_embeds = []
-        fmri_embeds = []
-
-        for batch in loader:
-            eeg = batch["eeg"].to(self.device, non_blocking=True)
-            fmri = batch["fmri"].to(self.device, non_blocking=True)
-            out = self.model(eeg=eeg, fmri=fmri)
-            loss = self.criterion(out["eeg_embed"], out["fmri_embed"])
-            total_loss += float(loss.item())
-            # 评估时不需要梯度，只聚合最终嵌入用于指标计算。
-            eeg_embeds.append(gather_tensor(out["eeg_embed"].detach()))
-            fmri_embeds.append(gather_tensor(out["fmri_embed"].detach()))
-
-        eeg_embed = torch.cat(eeg_embeds, dim=0)
-        fmri_embed = torch.cat(fmri_embeds, dim=0)
-        metrics = contrastive_retrieval_metrics(eeg_embed, fmri_embed)
-        metrics["loss"] = total_loss / max(1, len(loader))
-
-        return metrics
-
     def fit(self) -> None:
-        """执行完整训练流程；有验证集时按 mean_r1 选最好 checkpoint，否则退化为训练 loss。"""
-        use_val_selection = self.val_loader is not None
-        best = float("-inf") if use_val_selection else float("inf")
+        """执行完整训练流程，并按训练 loss 选择最好 checkpoint。"""
+        best = float("inf")
         best_epoch = 0
         last_train_loss = float("nan")
-        last_val_metrics = None
-        best_val_metrics = None
         for epoch in range(self.start_epoch, self.epochs + 1):
             train_loss, eeg_model_seconds, fmri_model_seconds = self.train_one_epoch(epoch)
             last_train_loss = train_loss
             current_score = train_loss
-            val_metrics = None
-            if self.val_loader is not None and epoch % self.eval_interval == 0:
-                val_metrics = self.evaluate(self.val_loader, split_name="val")
-                last_val_metrics = val_metrics
-                current_score = float(val_metrics["mean_r1"])
 
             if is_main_process():
                 summary_parts = [
@@ -328,41 +273,20 @@ class ContrastiveTrainer:
                     f"eeg_model_time={eeg_model_seconds:.1f}s",
                     f"fmri_model_time={fmri_model_seconds:.1f}s",
                 ]
-                if val_metrics is not None:
-                    summary_parts.extend(
-                        [
-                            f"val_loss={float(val_metrics['loss']):.6f}",
-                            f"val_mean_r1={float(val_metrics['mean_r1']):.4f}",
-                            f"val_mean_r5={float(val_metrics['mean_r5']):.4f}",
-                            f"val_eeg_to_fmri_r1={float(val_metrics['eeg_to_fmri_r1']):.4f}",
-                            f"val_eeg_to_fmri_r5={float(val_metrics['eeg_to_fmri_r5']):.4f}",
-                            f"val_fmri_to_eeg_r1={float(val_metrics['fmri_to_eeg_r1']):.4f}",
-                            f"val_fmri_to_eeg_r5={float(val_metrics['fmri_to_eeg_r5']):.4f}",
-                        ]
-                    )
                 print("Contrastive " + ", ".join(summary_parts), flush=True)
 
-            is_better = current_score > best if use_val_selection else current_score < best
-            if is_better:
-                best = current_score
+            if train_loss < best:
+                best = train_loss
                 best_epoch = epoch
-                extra = {"train_loss": train_loss}
-                if val_metrics is not None:
-                    extra["val_metrics"] = val_metrics
-                    best_val_metrics = val_metrics
-                self.save_checkpoint(epoch, best, "best.pth", extra=extra)
+                self.save_checkpoint(epoch, best, "best.pth", extra={"train_loss": train_loss})
 
         final_metrics = {
             "epochs": self.epochs,
             "best_epoch": best_epoch,
             "best_score": best,
-            "selection_mode": "val_mean_r1" if use_val_selection else "train_loss",
+            "selection_mode": "train_loss",
             "last_train_loss": last_train_loss,
         }
-        if last_val_metrics is not None:
-            final_metrics["last_val_metrics"] = last_val_metrics
-        if best_val_metrics is not None:
-            final_metrics["best_val_metrics"] = best_val_metrics
         self.save_metrics("final_metrics.json", final_metrics)
         cleanup_distributed()
 

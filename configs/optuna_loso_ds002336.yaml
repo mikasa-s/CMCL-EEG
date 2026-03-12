@@ -2,25 +2,26 @@ study:
   name: optuna_loso_ds002336
   default_mode: full
   direction: maximize
-  n_trials: 2
+  n_trials: 20
   output_dir: outputs/optuna/loso_ds002336
   command:
     - powershell
     - -ExecutionPolicy
     - Bypass
     - -File
-    - scripts/ds002336/run_ds002336.ps1
-  static_args: []
+    - scripts/run_optuna_pretrain_and_finetune.ps1
+  static_args:
+    - -TargetDataset
+    - ds002336
+    - -PretrainDatasets
+    - ds002336
+    - ds002739
   output_arg: -OutputRoot
-  sampler:
-    name: tpe
-    seed: 42
-    n_startup_trials: 3
 
 runtime_configs:
-  train_base: configs/train_ds002336.yaml
+  train_base: configs/train_joint_contrastive.yaml
   finetune_base: configs/finetune_ds002336.yaml
-  train_arg: -TrainConfig
+  train_arg: -JointTrainConfig
   finetune_arg: -FinetuneConfig
 
 metric:
@@ -126,23 +127,21 @@ modes:
   finetune_only:
     study_name: optuna_loso_ds002336_finetune_only
     output_dir: outputs/optuna/loso_ds002336_finetune_only
-    static_args: [-SkipContrastive]
+    static_args: [-SkipPretrain]
     metric:
       path: finetune/loso_finetune_summary.csv
       column: accuracy
       row_filter:
         fold: CROSS_FOLD_MEAN_STD
-    parameter_names: [lr, min_lr]
-    # train_epochs, batch_size, lr, weight_decay, min_lr, hidden_dim, grad_clip, early_stop_patience
+    parameter_names: [lr, min_lr, hidden_dim, early_stop_patience]
 
-  contrastive_only:
-    study_name: optuna_loso_ds002336_contrastive_only
-    output_dir: outputs/optuna/loso_ds002336_contrastive_only
+  pretrain_only:
+    study_name: optuna_loso_ds002336_pretrain_only
+    output_dir: outputs/optuna/loso_ds002336_pretrain_only
     static_args: [-SkipFinetune]
     metric:
-      path: contrastive/loso_contrastive_summary.csv
-      column: mean_r1
-      row_filter:
-        fold: CROSS_FOLD_MEAN_STD
-    parameter_names: [lr]
-    # train_epochs, batch_size, lr, weight_decay, min_lr, grad_clip
+      type: json
+      path: contrastive/final_metrics.json
+      key: best_score
+      transform: negate
+    parameter_names: [train_epochs, batch_size, lr, weight_decay, min_lr, grad_clip]

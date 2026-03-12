@@ -20,15 +20,12 @@ if str(PROJECT_ROOT) not in sys.path:
 def parse_args() -> argparse.Namespace:
     """解析命令行参数，支持直接覆盖常用训练配置。"""
     parser = argparse.ArgumentParser("EEG-fMRI contrastive training")
-    parser.add_argument("--config", type=str, default="configs/train_contrastive_neurostorm_volume.yaml")
-    parser.add_argument("--train-manifest", type=str, default="")
-    parser.add_argument("--val-manifest", type=str, default="")
-    parser.add_argument("--test-manifest", type=str, default="")
+    parser.add_argument("--config", type=str, default="configs/train_joint_contrastive.yaml")
+    parser.add_argument("--manifest", type=str, default="")
     parser.add_argument("--root-dir", type=str, default="")
     parser.add_argument("--output-dir", type=str, default="")
     parser.add_argument("--epochs", type=int, default=None)
     parser.add_argument("--batch-size", type=int, default=None)
-    parser.add_argument("--eval-batch-size", type=int, default=None)
     parser.add_argument("--num-workers", type=int, default=None)
     parser.add_argument("--lr", type=float, default=None)
     parser.add_argument("--resume-path", type=str, default="")
@@ -64,14 +61,11 @@ def assign_nested_value(payload: dict, dotted_key: str, value: object) -> None:
 
 def apply_overrides(config: dict, args: argparse.Namespace) -> dict:
     mapping: list[tuple[str, object]] = [
-        ("data.train_manifest_csv", args.train_manifest.strip()),
-        ("data.val_manifest_csv", args.val_manifest.strip()),
-        ("data.test_manifest_csv", args.test_manifest.strip()),
+        ("data.manifest_csv", args.manifest.strip()),
         ("data.root_dir", args.root_dir.strip()),
         ("train.output_dir", args.output_dir.strip()),
         ("train.epochs", args.epochs),
         ("train.batch_size", args.batch_size),
-        ("train.eval_batch_size", args.eval_batch_size),
         ("train.num_workers", args.num_workers),
         ("train.lr", args.lr),
         ("train.resume_path", args.resume_path.strip()),

@@ -1,21 +1,10 @@
 from __future__ import annotations
 
-# python .\run_optuna_search.py --study-config configs\optuna_loso_ds002336.yaml --mode finetune_only
-# python .\run_optuna_search.py --study-config configs\optuna_loso_ds002336.yaml --mode contrastive_only
-
-"""基于 Optuna 的自动化超参搜索与结果汇总入口。"""
-
 import argparse
 import csv
-import copy
-import hashlib
 import json
-import math
-import os
-import statistics
 import subprocess
 import sys
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -27,12 +16,11 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser("Optuna automation for EEG-fMRI-Contrastive")
     parser.add_argument("--study-config", type=str, required=True, help="YAML file that defines command, search space, and metric source.")
-    parser.add_argument("--mode", type=str, default="", help="Optional study mode, such as full, finetune_only, or contrastive_only.")
+    parser.add_argument("--mode", type=str, default="", help="Optional study mode, such as full, finetune_only, or pretrain_only.")
     parser.add_argument("--n-trials", type=int, default=None, help="Override study.n_trials from YAML.")
     parser.add_argument("--timeout", type=int, default=None, help="Override study.timeout in seconds.")
     parser.add_argument("--study-name", type=str, default="", help="Override study.name from YAML.")
     parser.add_argument("--output-dir", type=str, default="", help="Override study.output_dir from YAML.")
-    parser.add_argument("--summary-only", action="store_true", help="Only regenerate summaries from an existing study database.")
     parser.add_argument("--fail-fast", action="store_true", help="Stop immediately when a trial command fails.")
     return parser.parse_args()
 
@@ -69,115 +57,60 @@ def normalize_study_config(raw: dict[str, Any], args: argparse.Namespace, config
     metric_cfg = dict(raw.get("metric", {}))
     parameters_cfg = dict(raw.get("parameters", {}))
     modes_cfg = dict(raw.get("modes", {}))
-    if not study_cfg:
-        raise ValueError("Missing 'study' section in study config")
-    if not metric_cfg:
-        raise ValueError("Missing 'metric' section in study config")
-    if not parameters_cfg:
-        raise ValueError("Missing 'parameters' section in study config")
-
-    config_dir = config_path.resolve().parent
-    study_name = args.study_name.strip() or str(study_cfg.get("name", config_path.stem)).strip()
-    if not study_name:
-        raise ValueError("study.name must not be empty")
-
-    output_dir_value = args.output_dir.strip() or str(study_cfg.get("output_dir", f"outputs/optuna/{study_name}"))
-    output_dir = resolve_path(output_dir_value, base_dir=PROJECT_ROOT)
-    command = study_cfg.get("command", [])
-    if not isinstance(command, list) or not command:
-        raise ValueError("study.command must be a non-empty string list")
-
-    static_args = study_cfg.get("static_args", [])
-    if not isinstance(static_args, list):
-        raise ValueError("study.static_args must be a string list")
-
-    cwd_value = str(study_cfg.get("cwd", "."))
-    cwd = resolve_path(cwd_value, base_dir=PROJECT_ROOT)
-    storage_value = str(study_cfg.get("storage", "")).strip()
-    if storage_value:
-        storage = storage_value
-        storage_path = None
-    else:
-        storage_path = output_dir / "study.db"
-        storage = f"sqlite:///{storage_path.as_posix()}"
-
-    metric_path = metric_cfg.get("path")
-    if not metric_path:
-        raise ValueError("metric.path must be configured")
+    runtime_cfg = dict(raw.get("runtime_configs", {}))
+    if not study_cfg or not metric_cfg or not parameters_cfg:
+        raise ValueError("Study config must contain study, metric, and parameters sections")
 
     normalized = {
         "config_path": config_path.resolve(),
-        "config_dir": config_dir,
-        "study_name": study_name,
-        "mode": "",
+        "study_name": args.study_name.strip() or str(study_cfg.get("name", config_path.stem)).strip(),
         "direction": str(study_cfg.get("direction", "maximize")).strip().lower(),
         "n_trials": int(args.n_trials if args.n_trials is not None else study_cfg.get("n_trials", 20)),
         "timeout": args.timeout if args.timeout is not None else study_cfg.get("timeout", None),
-        "output_dir": output_dir,
-        "storage": storage,
-        "storage_path": storage_path,
-        "command": [str(item) for item in command],
-        "static_args": [str(item) for item in static_args],
-        "cwd": cwd,
+        "output_dir": resolve_path(args.output_dir.strip() or str(study_cfg.get("output_dir", f"outputs/optuna/{config_path.stem}")), base_dir=PROJECT_ROOT),
+        "command": [str(item) for item in study_cfg.get("command", [])],
+        "static_args": [str(item) for item in study_cfg.get("static_args", [])],
+        "cwd": resolve_path(str(study_cfg.get("cwd", ".")), base_dir=PROJECT_ROOT),
         "output_arg": str(study_cfg.get("output_arg", "")).strip(),
-        "sampler": dict(study_cfg.get("sampler", {})),
         "metric": {
             "type": str(metric_cfg.get("type", "json")).strip().lower(),
-            "path": str(metric_path),
+            "path": str(metric_cfg.get("path", "")).strip(),
             "key": str(metric_cfg.get("key", "")).strip(),
             "column": str(metric_cfg.get("column", "")).strip(),
             "row_filter": dict(metric_cfg.get("row_filter", {})),
+            "transform": str(metric_cfg.get("transform", "none")).strip().lower(),
         },
         "parameters": parameters_cfg,
-        "runtime_configs": {},
-        "study_name_overridden": bool(args.study_name.strip()),
-        "output_dir_overridden": bool(args.output_dir.strip()),
-        "storage_explicit": bool(storage_value),
-    }
-
-    runtime_cfg = dict(raw.get("runtime_configs", {}))
-    if runtime_cfg:
-        normalized["runtime_configs"] = {
+        "runtime_configs": {
             "train_base": resolve_path(str(runtime_cfg.get("train_base", "")), base_dir=PROJECT_ROOT) if str(runtime_cfg.get("train_base", "")).strip() else None,
             "finetune_base": resolve_path(str(runtime_cfg.get("finetune_base", "")), base_dir=PROJECT_ROOT) if str(runtime_cfg.get("finetune_base", "")).strip() else None,
-            "train_arg": str(runtime_cfg.get("train_arg", "-TrainConfig")).strip(),
+            "train_arg": str(runtime_cfg.get("train_arg", "-JointTrainConfig")).strip(),
             "finetune_arg": str(runtime_cfg.get("finetune_arg", "-FinetuneConfig")).strip(),
-        }
+        },
+    }
 
-    selected_mode = args.mode.strip() or str(study_cfg.get("default_mode", "")).strip()
-    if selected_mode:
-        if selected_mode not in modes_cfg:
-            raise ValueError(f"Unknown mode '{selected_mode}'. Available: {', '.join(sorted(modes_cfg.keys()))}")
-        mode_cfg = dict(modes_cfg[selected_mode] or {})
-        normalized["mode"] = selected_mode
-        if not args.study_name and mode_cfg.get("study_name"):
-            normalized["study_name"] = str(mode_cfg["study_name"]).strip()
+    mode_name = args.mode.strip() or str(study_cfg.get("default_mode", "")).strip()
+    if mode_name:
+        if mode_name not in modes_cfg:
+            raise ValueError(f"Unknown mode '{mode_name}'. Available: {', '.join(sorted(modes_cfg.keys()))}")
+        mode_cfg = dict(modes_cfg[mode_name] or {})
+        normalized["study_name"] = str(mode_cfg.get("study_name", normalized["study_name"])).strip()
         if not args.output_dir and mode_cfg.get("output_dir"):
             normalized["output_dir"] = resolve_path(str(mode_cfg["output_dir"]), base_dir=PROJECT_ROOT)
-            if not storage_value:
-                normalized["storage_path"] = normalized["output_dir"] / "study.db"
-                normalized["storage"] = f"sqlite:///{normalized['storage_path'].as_posix()}"
         normalized["static_args"] = normalized["static_args"] + [str(item) for item in mode_cfg.get("static_args", [])]
-        if "metric" in mode_cfg:
+        if mode_cfg.get("metric"):
             merged_metric = dict(normalized["metric"])
-            merged_metric.update(dict(mode_cfg.get("metric", {})))
+            merged_metric.update(dict(mode_cfg["metric"]))
             normalized["metric"] = merged_metric
-        mode_parameters = dict(mode_cfg.get("parameters", {}))
-        if mode_parameters:
-            normalized["parameters"].update(mode_parameters)
         parameter_names = mode_cfg.get("parameter_names")
         if parameter_names:
             normalized["parameters"] = {name: normalized["parameters"][name] for name in parameter_names}
 
-    if normalized["direction"] not in {"maximize", "minimize"}:
-        raise ValueError("study.direction must be 'maximize' or 'minimize'")
-    if normalized["metric"]["type"] not in {"json", "csv"}:
-        raise ValueError("metric.type must be 'json' or 'csv'")
+    if not normalized["command"]:
+        raise ValueError("study.command must be a non-empty string list")
+    if not normalized["output_arg"]:
+        raise ValueError("study.output_arg must be configured")
     return normalized
-
-
-def json_scalar(value: Any) -> str:
-    return json.dumps(value, ensure_ascii=False)
 
 
 def sample_parameter(trial: Any, name: str, spec: dict[str, Any]) -> Any:
@@ -185,8 +118,7 @@ def sample_parameter(trial: Any, name: str, spec: dict[str, Any]) -> Any:
     if suggest in {"float", "suggest_float"}:
         return trial.suggest_float(name, float(spec["low"]), float(spec["high"]), log=bool(spec.get("log", False)), step=spec.get("step"))
     if suggest in {"int", "suggest_int"}:
-        step = int(spec.get("step", 1))
-        return trial.suggest_int(name, int(spec["low"]), int(spec["high"]), step=step, log=bool(spec.get("log", False)))
+        return trial.suggest_int(name, int(spec["low"]), int(spec["high"]), step=int(spec.get("step", 1)), log=bool(spec.get("log", False)))
     if suggest in {"categorical", "choice", "choices", "suggest_categorical"}:
         choices = spec.get("choices")
         if not isinstance(choices, list) or not choices:
@@ -195,129 +127,15 @@ def sample_parameter(trial: Any, name: str, spec: dict[str, Any]) -> Any:
     raise ValueError(f"Unsupported parameter suggest type for '{name}': {suggest}")
 
 
-def build_parameter_distribution(spec: dict[str, Any], optuna_module: Any) -> Any:
-    suggest = str(spec.get("suggest", spec.get("type", ""))).strip().lower()
-    distributions = optuna_module.distributions
-    if suggest in {"float", "suggest_float"}:
-        return distributions.FloatDistribution(
-            low=float(spec["low"]),
-            high=float(spec["high"]),
-            log=bool(spec.get("log", False)),
-            step=spec.get("step"),
-        )
-    if suggest in {"int", "suggest_int"}:
-        return distributions.IntDistribution(
-            low=int(spec["low"]),
-            high=int(spec["high"]),
-            log=bool(spec.get("log", False)),
-            step=int(spec.get("step", 1)),
-        )
-    if suggest in {"categorical", "choice", "choices", "suggest_categorical"}:
-        choices = spec.get("choices")
-        if not isinstance(choices, list) or not choices:
-            raise ValueError("Categorical parameter requires a non-empty choices list")
-        return distributions.CategoricalDistribution(choices=tuple(choices))
-    raise ValueError(f"Unsupported parameter suggest type: {suggest}")
-
-
-def build_search_space_signature(study_cfg: dict[str, Any]) -> str:
-    signature_payload = {
-        "mode": study_cfg.get("mode", ""),
-        "direction": study_cfg.get("direction", "maximize"),
-        "metric": study_cfg.get("metric", {}),
-        "parameters": study_cfg.get("parameters", {}),
-        "static_args": study_cfg.get("static_args", []),
-        "command": study_cfg.get("command", []),
-    }
-    canonical = json.dumps(signature_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha1(canonical.encode("utf-8")).hexdigest()
-
-
-def find_distribution_mismatches(study: Any, study_cfg: dict[str, Any], optuna_module: Any) -> list[str]:
-    expected = {
-        name: build_parameter_distribution(spec, optuna_module)
-        for name, spec in study_cfg["parameters"].items()
-        if isinstance(spec, dict)
-    }
-    mismatches: list[str] = []
-    check_compatibility = optuna_module.distributions.check_distribution_compatibility
-
-    for trial in study.trials:
-        for name, distribution in trial.distributions.items():
-            if name not in expected:
+def apply_config_updates(config_payloads: dict[str, dict[str, Any]], sampled_values: dict[str, Any], parameters_cfg: dict[str, Any]) -> None:
+    for name, value in sampled_values.items():
+        spec = dict(parameters_cfg[name])
+        for update in spec.get("config_updates", []):
+            config_name = str(update.get("config", "")).strip()
+            dotted_key = str(update.get("key", "")).strip()
+            if config_name not in config_payloads or not dotted_key:
                 continue
-            try:
-                check_compatibility(distribution, expected[name])
-            except ValueError as exc:
-                mismatches.append(
-                    f"param '{name}' existing={distribution} current={expected[name]} ({exc})"
-                )
-                break
-        if mismatches:
-            break
-    return mismatches
-
-
-def can_auto_isolate_study(study_cfg: dict[str, Any]) -> bool:
-    return not study_cfg.get("study_name_overridden", False) and not study_cfg.get("output_dir_overridden", False) and not study_cfg.get("storage_explicit", False)
-
-
-def isolate_study_config(study_cfg: dict[str, Any]) -> dict[str, Any]:
-    isolated = dict(study_cfg)
-    suffix = build_search_space_signature(study_cfg)[:8]
-    isolated["study_name"] = f"{study_cfg['study_name']}__{suffix}"
-    output_dir = Path(study_cfg["output_dir"])
-    isolated["output_dir"] = output_dir.with_name(f"{output_dir.name}__{suffix}")
-    isolated["storage_path"] = isolated["output_dir"] / "study.db"
-    isolated["storage"] = f"sqlite:///{isolated['storage_path'].as_posix()}"
-    return isolated
-
-
-def create_or_load_study(study_cfg: dict[str, Any], sampler: Any, optuna_module: Any) -> Any:
-    return optuna_module.create_study(
-        study_name=study_cfg["study_name"],
-        storage=study_cfg["storage"],
-        direction=study_cfg["direction"],
-        sampler=sampler,
-        load_if_exists=True,
-    )
-
-
-def append_parameter_args(command: list[str], param_name: str, param_value: Any, spec: dict[str, Any]) -> None:
-    target = str(spec.get("target", "override")).strip().lower()
-    if target == "override":
-        command.extend(["--set", f"{param_name}={json_scalar(param_value)}"])
-        return
-
-    if target != "arg":
-        raise ValueError(f"Unsupported target for '{param_name}': {target}")
-
-    arg_name = str(spec.get("arg", "")).strip()
-    if not arg_name:
-        raise ValueError(f"Parameter '{param_name}' uses target=arg but no arg field was provided")
-
-    if bool(spec.get("flag", False)):
-        if bool(param_value):
-            command.append(arg_name)
-        return
-
-    command.extend([arg_name, str(param_value)])
-
-
-def apply_config_parameter(config_payloads: dict[str, dict[str, Any]], param_name: str, param_value: Any, spec: dict[str, Any]) -> None:
-    updates = spec.get("config_updates", [])
-    if not isinstance(updates, list) or not updates:
-        raise ValueError(f"Parameter '{param_name}' uses target=config but has no config_updates")
-    for update in updates:
-        if not isinstance(update, dict):
-            raise ValueError(f"Parameter '{param_name}' has invalid config_updates entry")
-        config_name = str(update.get("config", "")).strip()
-        dotted_key = str(update.get("key", "")).strip()
-        if config_name not in config_payloads:
-            raise ValueError(f"Parameter '{param_name}' references unknown runtime config '{config_name}'")
-        if not dotted_key:
-            raise ValueError(f"Parameter '{param_name}' config update is missing key")
-        assign_nested_value(config_payloads[config_name], dotted_key, param_value)
+            assign_nested_value(config_payloads[config_name], dotted_key, value)
 
 
 def write_yaml(path: Path, payload: dict[str, Any]) -> None:
@@ -326,371 +144,129 @@ def write_yaml(path: Path, payload: dict[str, Any]) -> None:
         yaml.safe_dump(payload, handle, sort_keys=False, allow_unicode=True)
 
 
-def build_metric_path(metric_cfg: dict[str, Any], run_output_dir: Path, cwd: Path) -> Path:
-    path = Path(metric_cfg["path"])
-    if path.is_absolute():
-        return path
-    return (run_output_dir / path) if run_output_dir else (cwd / path)
-
-
-def lookup_json_key(payload: dict[str, Any], dotted_key: str) -> Any:
-    cursor: Any = payload
-    for part in dotted_key.split("."):
-        if not isinstance(cursor, dict) or part not in cursor:
-            raise KeyError(f"Missing metric key: {dotted_key}")
-        cursor = cursor[part]
-    return cursor
-
-
-def value_matches(actual: str | None, expected: Any) -> bool:
-    if actual is None:
-        return False
-    if isinstance(expected, (int, float)):
-        try:
-            return math.isclose(float(actual), float(expected), rel_tol=1e-9, abs_tol=1e-9)
-        except ValueError:
-            return False
-    return str(actual) == str(expected)
-
-
-def load_metric_value(metric_cfg: dict[str, Any], run_output_dir: Path, cwd: Path) -> float:
-    metric_path = build_metric_path(metric_cfg, run_output_dir, cwd)
+def extract_metric(metric_cfg: dict[str, Any], output_root: Path) -> float:
+    metric_path = output_root / metric_cfg["path"]
     if not metric_path.exists():
         raise FileNotFoundError(f"Metric file not found: {metric_path}")
 
-    if metric_cfg["type"] == "json":
+    if metric_cfg["type"] == "csv":
+        with open(metric_path, "r", encoding="utf-8", newline="") as handle:
+            rows = list(csv.DictReader(handle))
+        filtered_rows = rows
+        for key, expected in metric_cfg.get("row_filter", {}).items():
+            filtered_rows = [row for row in filtered_rows if str(row.get(key, "")) == str(expected)]
+        if not filtered_rows:
+            raise ValueError(f"No metric row matched filter in {metric_path}")
+        value = float(filtered_rows[0][metric_cfg["column"]])
+    else:
         with open(metric_path, "r", encoding="utf-8") as handle:
             payload = json.load(handle)
-        metric_value = lookup_json_key(payload, metric_cfg["key"])
-        return float(metric_value)
+        cursor: Any = payload
+        for token in metric_cfg["key"].split("."):
+            token = token.strip()
+            if not token:
+                continue
+            cursor = cursor[token]
+        value = float(cursor)
 
-    with open(metric_path, "r", encoding="utf-8", newline="") as handle:
-        rows = list(csv.DictReader(handle))
-    row_filter = metric_cfg.get("row_filter", {})
-    selected_rows = rows
-    if row_filter:
-        selected_rows = [
-            row
-            for row in rows
-            if all(value_matches(row.get(key), expected) for key, expected in row_filter.items())
-        ]
-    if not selected_rows:
-        raise ValueError(f"No matching row found in metric CSV: {metric_path}")
-    column = metric_cfg.get("column", "")
-    if not column:
-        raise ValueError("metric.column must be configured for csv metrics")
-    return float(selected_rows[0][column])
+    if metric_cfg.get("transform") == "negate":
+        return -value
+    return value
 
 
-def build_trial_command(study_cfg: dict[str, Any], trial: Any, trial_dir: Path) -> tuple[list[str], dict[str, Any], Path | None]:
-    command = list(study_cfg["command"])
-    command.extend(study_cfg["static_args"])
-
-    run_output_dir: Path | None = None
-    if study_cfg["output_arg"]:
-        run_output_dir = trial_dir / "run_output"
-        run_output_dir.mkdir(parents=True, exist_ok=True)
-        command.extend([study_cfg["output_arg"], str(run_output_dir)])
-
-    runtime_config_payloads: dict[str, dict[str, Any]] = {}
-    runtime_configs = study_cfg.get("runtime_configs", {})
-    train_base = runtime_configs.get("train_base")
-    finetune_base = runtime_configs.get("finetune_base")
-    if train_base is not None:
-        runtime_config_payloads["train"] = copy.deepcopy(load_yaml(train_base))
-    if finetune_base is not None:
-        runtime_config_payloads["finetune"] = copy.deepcopy(load_yaml(finetune_base))
-
-    sampled_params: dict[str, Any] = {}
-    for param_name, raw_spec in study_cfg["parameters"].items():
-        if not isinstance(raw_spec, dict):
-            raise ValueError(f"Parameter spec for '{param_name}' must be a mapping")
-        value = sample_parameter(trial, param_name, raw_spec)
-        sampled_params[param_name] = value
-        target = str(raw_spec.get("target", "override")).strip().lower()
-        if target == "config":
-            apply_config_parameter(runtime_config_payloads, param_name, value, raw_spec)
-        else:
-            append_parameter_args(command, param_name, value, raw_spec)
-
-    if "train" in runtime_config_payloads:
-        train_config_path = trial_dir / "runtime_train_config.yaml"
-        write_yaml(train_config_path, runtime_config_payloads["train"])
-        command.extend([runtime_configs.get("train_arg", "-TrainConfig"), str(train_config_path)])
-    if "finetune" in runtime_config_payloads:
-        finetune_config_path = trial_dir / "runtime_finetune_config.yaml"
-        write_yaml(finetune_config_path, runtime_config_payloads["finetune"])
-        command.extend([runtime_configs.get("finetune_arg", "-FinetuneConfig"), str(finetune_config_path)])
-
-    return command, sampled_params, run_output_dir
-
-
-def timestamp_text() -> str:
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-
-def write_json(path: Path, payload: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w", encoding="utf-8") as handle:
-        json.dump(payload, handle, ensure_ascii=False, indent=2)
-
-
-def build_sampler(study_cfg: dict[str, Any], optuna_module: Any) -> Any:
-    sampler_cfg = study_cfg.get("sampler", {})
-    sampler_name = str(sampler_cfg.get("name", "tpe")).strip().lower()
-    seed = sampler_cfg.get("seed", 42)
-    if sampler_name == "random":
-        return optuna_module.samplers.RandomSampler(seed=seed)
-    return optuna_module.samplers.TPESampler(
-        seed=seed,
-        n_startup_trials=int(sampler_cfg.get("n_startup_trials", 5)),
-        multivariate=bool(sampler_cfg.get("multivariate", True)),
-    )
-
-
-def summarize_trials(study: Any) -> dict[str, Any]:
-    completed = [trial for trial in study.trials if trial.state.name == "COMPLETE" and trial.value is not None]
-    failed = [trial for trial in study.trials if trial.state.name == "FAIL"]
-    pruned = [trial for trial in study.trials if trial.state.name == "PRUNED"]
-    summary: dict[str, Any] = {
-        "study_name": study.study_name,
-        "direction": str(study.direction).split(".")[-1].lower(),
-        "trial_count": len(study.trials),
-        "completed_trials": len(completed),
-        "failed_trials": len(failed),
-        "pruned_trials": len(pruned),
-    }
-    if completed:
-        values = [float(trial.value) for trial in completed]
-        summary["metric_stats"] = {
-            "best": max(values),
-            "worst": min(values),
-            "mean": statistics.fmean(values),
-            "std": statistics.pstdev(values) if len(values) > 1 else 0.0,
-        }
-    else:
-        summary["metric_stats"] = {}
-    return summary
-
-
-def write_study_summaries(study: Any, study_cfg: dict[str, Any]) -> None:
-    output_dir = study_cfg["output_dir"]
-    output_dir.mkdir(parents=True, exist_ok=True)
-    rows: list[dict[str, Any]] = []
-    for trial in study.trials:
-        row: dict[str, Any] = {
-            "trial_number": trial.number,
-            "state": trial.state.name,
-            "value": trial.value,
-        }
-        row.update({f"param.{key}": value for key, value in trial.params.items()})
-        for attr_key, attr_value in trial.user_attrs.items():
-            if isinstance(attr_value, (dict, list)):
-                row[f"attr.{attr_key}"] = json.dumps(attr_value, ensure_ascii=False)
-            else:
-                row[f"attr.{attr_key}"] = attr_value
-        rows.append(row)
-
-    fieldnames: list[str] = []
-    for row in rows:
-        for key in row.keys():
-            if key not in fieldnames:
-                fieldnames.append(key)
-
-    csv_path = output_dir / "trials.csv"
-    with open(csv_path, "w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(rows)
-
-    summary = summarize_trials(study)
-    best_payload: dict[str, Any]
-    try:
-        best_trial = study.best_trial
-        best_payload = {
-            "trial_number": best_trial.number,
-            "value": best_trial.value,
-            "params": best_trial.params,
-            "user_attrs": best_trial.user_attrs,
-        }
-    except ValueError:
-        best_payload = {}
-
-    write_json(output_dir / "study_summary.json", summary)
-    write_json(output_dir / "best_trial.json", best_payload)
-
-    md_lines = [
-        f"# Optuna Summary: {study.study_name}",
-        "",
-        f"- Generated at: {timestamp_text()}",
-        f"- Direction: {summary['direction']}",
-        f"- Total trials: {summary['trial_count']}",
-        f"- Completed trials: {summary['completed_trials']}",
-        f"- Failed trials: {summary['failed_trials']}",
-        f"- Pruned trials: {summary['pruned_trials']}",
-        "",
-    ]
-    if best_payload:
-        md_lines.extend(
-            [
-                "## Best Trial",
-                "",
-                f"- Trial: {best_payload['trial_number']}",
-                f"- Value: {best_payload['value']}",
-                f"- Output: {best_payload['user_attrs'].get('run_output_dir', '')}",
-                "",
-                "## Best Params",
-                "",
-            ]
-        )
-        for key, value in best_payload["params"].items():
-            md_lines.append(f"- {key}: {value}")
-        md_lines.append("")
-
-    top_trials = [trial for trial in study.trials if trial.state.name == "COMPLETE" and trial.value is not None]
-    reverse = study_cfg["direction"] == "maximize"
-    top_trials.sort(key=lambda item: float(item.value), reverse=reverse)
-    if top_trials:
-        md_lines.extend([
-            "## Top Trials",
-            "",
-            "| trial | value | state |",
-            "| --- | ---: | --- |",
-        ])
-        for trial in top_trials[:10]:
-            md_lines.append(f"| {trial.number} | {float(trial.value):.6f} | {trial.state.name} |")
-        md_lines.append("")
-
-    with open(output_dir / "study_summary.md", "w", encoding="utf-8") as handle:
-        handle.write("\n".join(md_lines).strip() + "\n")
-
-
-def run_trial_process(study_cfg: dict[str, Any], trial: Any) -> float:
-    trial_dir = study_cfg["output_dir"] / "trials" / f"trial_{trial.number:04d}"
-    trial_dir.mkdir(parents=True, exist_ok=True)
-    command, sampled_params, run_output_dir = build_trial_command(study_cfg, trial, trial_dir)
-
-    stdout_path = trial_dir / "stdout.log"
-    stderr_path = trial_dir / "stderr.log"
-    command_text = subprocess.list2cmdline(command)
-    write_json(
-        trial_dir / "trial_plan.json",
-        {
-            "trial_number": trial.number,
-            "created_at": timestamp_text(),
-            "cwd": str(study_cfg["cwd"]),
-            "command": command,
-            "command_text": command_text,
-            "params": sampled_params,
-            "run_output_dir": str(run_output_dir) if run_output_dir else "",
-        },
-    )
-
-    with open(stdout_path, "w", encoding="utf-8") as stdout_handle, open(stderr_path, "w", encoding="utf-8") as stderr_handle:
-        child_env = dict(os.environ)
-        child_env["PYTHON_EXE"] = sys.executable
-        completed = subprocess.run(
-            command,
-            cwd=study_cfg["cwd"],
-            env=child_env,
-            stdout=stdout_handle,
-            stderr=stderr_handle,
-            check=False,
-            text=True,
-        )
-
+def run_trial_command(command: list[str], cwd: Path) -> None:
+    completed = subprocess.run(command, cwd=str(cwd), check=False)
     if completed.returncode != 0:
-        trial.set_user_attr("command", command_text)
-        trial.set_user_attr("stdout_log", str(stdout_path))
-        trial.set_user_attr("stderr_log", str(stderr_path))
-        raise RuntimeError(f"Trial {trial.number} failed with exit code {completed.returncode}")
-
-    metric_value = load_metric_value(study_cfg["metric"], run_output_dir or study_cfg["output_dir"], study_cfg["cwd"])
-    trial.set_user_attr("command", command_text)
-    trial.set_user_attr("stdout_log", str(stdout_path))
-    trial.set_user_attr("stderr_log", str(stderr_path))
-    trial.set_user_attr("run_output_dir", str(run_output_dir) if run_output_dir else "")
-    trial.set_user_attr("metric_path", str(build_metric_path(study_cfg["metric"], run_output_dir or study_cfg["output_dir"], study_cfg["cwd"])))
-    trial.set_user_attr("params", sampled_params)
-    write_json(
-        trial_dir / "trial_result.json",
-        {
-            "trial_number": trial.number,
-            "completed_at": timestamp_text(),
-            "value": metric_value,
-            "params": sampled_params,
-            "run_output_dir": str(run_output_dir) if run_output_dir else "",
-            "metric_path": str(build_metric_path(study_cfg["metric"], run_output_dir or study_cfg["output_dir"], study_cfg["cwd"])),
-        },
-    )
-    return metric_value
-
-
-def import_optuna() -> Any:
-    try:
-        import optuna
-    except ImportError as exc:
-        raise RuntimeError("Optuna is not installed. Run 'pip install -r requirements.txt' first.") from exc
-    return optuna
+        raise RuntimeError(f"Trial command failed with exit code {completed.returncode}")
 
 
 def main() -> None:
     args = parse_args()
-    raw_cfg = load_yaml(Path(args.study_config))
-    study_cfg = normalize_study_config(raw_cfg, args, Path(args.study_config))
-    study_cfg["output_dir"].mkdir(parents=True, exist_ok=True)
-    study_cfg["search_space_signature"] = build_search_space_signature(study_cfg)
-
-    optuna = import_optuna()
-    sampler = build_sampler(study_cfg, optuna)
-    study = create_or_load_study(study_cfg, sampler, optuna)
-    mismatches = find_distribution_mismatches(study, study_cfg, optuna)
-    if mismatches:
-        if can_auto_isolate_study(study_cfg):
-            previous_name = study_cfg["study_name"]
-            previous_output = study_cfg["output_dir"]
-            study_cfg = isolate_study_config(study_cfg)
-            study_cfg["output_dir"].mkdir(parents=True, exist_ok=True)
-            sampler = build_sampler(study_cfg, optuna)
-            study = create_or_load_study(study_cfg, sampler, optuna)
-            print(
-                "Detected incompatible existing Optuna search space; "
-                f"isolating new study '{study_cfg['study_name']}' under '{study_cfg['output_dir']}'. "
-                f"Previous study '{previous_name}' remains at '{previous_output}'."
-            )
-        else:
-            details = "; ".join(mismatches)
-            raise RuntimeError(
-                "Existing Optuna study is incompatible with the current parameter space. "
-                f"Details: {details}. Use a new --study-name/--output-dir or remove the old study database."
-            )
-
-    study.set_user_attr("search_space_signature", study_cfg["search_space_signature"])
-    study.set_user_attr("mode", study_cfg.get("mode", ""))
-    study.set_user_attr("config_path", str(study_cfg["config_path"]))
-
-    if args.summary_only:
-        write_study_summaries(study, study_cfg)
-        print(f"Summary refreshed under: {study_cfg['output_dir']}")
-        return
-
-    catch_exceptions: tuple[type[BaseException], ...] = () if args.fail_fast else (RuntimeError, FileNotFoundError, ValueError)
-    study.optimize(
-        lambda trial: run_trial_process(study_cfg, trial),
-        n_trials=study_cfg["n_trials"],
-        timeout=study_cfg["timeout"],
-        catch=catch_exceptions,
-    )
-    write_study_summaries(study, study_cfg)
+    study_config_path = resolve_path(args.study_config, base_dir=PROJECT_ROOT)
+    study_cfg = normalize_study_config(load_yaml(study_config_path), args, study_config_path)
 
     try:
-        best_trial = study.best_trial
-        print(f"Best trial: {best_trial.number}")
-        print(f"Best value: {best_trial.value}")
-        print(f"Summary dir: {study_cfg['output_dir']}")
-    except ValueError:
-        print(f"No completed trial was produced. See: {study_cfg['output_dir']}")
+        import optuna
+    except ImportError as exc:
+        raise RuntimeError("Optuna is not installed in the current Python environment") from exc
+
+    study_cfg["output_dir"].mkdir(parents=True, exist_ok=True)
+    trials_dir = study_cfg["output_dir"] / "trials"
+    trials_dir.mkdir(parents=True, exist_ok=True)
+
+    study = optuna.create_study(direction=study_cfg["direction"], study_name=study_cfg["study_name"])
+    trial_rows: list[dict[str, Any]] = []
+
+    def objective(trial: Any) -> float:
+        sampled_values = {name: sample_parameter(trial, name, spec) for name, spec in study_cfg["parameters"].items()}
+        trial_dir = trials_dir / f"trial_{trial.number:04d}"
+        trial_output_root = trial_dir / "run_output"
+        trial_dir.mkdir(parents=True, exist_ok=True)
+        trial_output_root.mkdir(parents=True, exist_ok=True)
+
+        config_payloads: dict[str, dict[str, Any]] = {}
+        runtime_cfg = study_cfg["runtime_configs"]
+        if runtime_cfg.get("train_base") is not None:
+            config_payloads["train"] = load_yaml(Path(runtime_cfg["train_base"]))
+        if runtime_cfg.get("finetune_base") is not None:
+            config_payloads["finetune"] = load_yaml(Path(runtime_cfg["finetune_base"]))
+        apply_config_updates(config_payloads, sampled_values, study_cfg["parameters"])
+
+        command = list(study_cfg["command"])
+        command.extend(study_cfg["static_args"])
+        command.extend([study_cfg["output_arg"], str(trial_output_root)])
+
+        if "train" in config_payloads:
+            runtime_train_path = trial_dir / "runtime_train_config.yaml"
+            write_yaml(runtime_train_path, config_payloads["train"])
+            command.extend([runtime_cfg["train_arg"], str(runtime_train_path)])
+        if "finetune" in config_payloads:
+            runtime_finetune_path = trial_dir / "runtime_finetune_config.yaml"
+            write_yaml(runtime_finetune_path, config_payloads["finetune"])
+            command.extend([runtime_cfg["finetune_arg"], str(runtime_finetune_path)])
+
+        for name, value in sampled_values.items():
+            spec = dict(study_cfg["parameters"][name])
+            if str(spec.get("target", "config")).strip().lower() != "cli":
+                continue
+            cli_arg = str(spec.get("cli_arg", "")).strip()
+            if cli_arg:
+                command.extend([cli_arg, str(value)])
+
+        with open(trial_dir / "trial_plan.json", "w", encoding="utf-8") as handle:
+            json.dump({"command": command, "sampled_values": sampled_values}, handle, ensure_ascii=False, indent=2)
+
+        run_trial_command(command, cwd=study_cfg["cwd"])
+        metric_value = extract_metric(study_cfg["metric"], trial_output_root)
+        trial_rows.append({"trial": trial.number, "metric": metric_value, **sampled_values})
+        return metric_value
+
+    study.optimize(objective, n_trials=study_cfg["n_trials"], timeout=study_cfg["timeout"], catch=(Exception,) if not args.fail_fast else ())
+
+    if trial_rows:
+        with open(study_cfg["output_dir"] / "trials_summary.csv", "w", encoding="utf-8", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=list(trial_rows[0].keys()))
+            writer.writeheader()
+            writer.writerows(trial_rows)
+
+    completed_trials = [trial for trial in study.trials if trial.value is not None]
+    if not completed_trials:
+        raise RuntimeError("No Optuna trial completed successfully")
+
+    best_payload = {
+        "study_name": study.study_name,
+        "best_value": study.best_value,
+        "best_params": study.best_params,
+        "direction": study.direction.name.lower(),
+    }
+    with open(study_cfg["output_dir"] / "best_trial.json", "w", encoding="utf-8") as handle:
+        json.dump(best_payload, handle, ensure_ascii=False, indent=2)
+    print(json.dumps(best_payload, ensure_ascii=False, indent=2))
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as exc:
+        print(f"Optuna run failed: {exc}", file=sys.stderr)
+        raise

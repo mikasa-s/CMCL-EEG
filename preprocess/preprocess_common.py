@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+import re
 import sys
 import shutil
 from typing import Sequence
@@ -16,6 +17,134 @@ from scipy.ndimage import zoom
 from scipy.signal import resample
 
 sys.path.append(str(Path(__file__).resolve().parent.parent))
+
+
+EEG_CHANNEL_ALIAS_MAP = {
+    "T3": "T7",
+    "T4": "T8",
+    "T5": "P7",
+    "T6": "P8",
+    "A1": "TP9",
+    "A2": "TP10",
+    "M1": "TP9",
+    "M2": "TP10",
+}
+
+
+def normalize_subject_id(subject_id: str, min_digits: int = 2) -> str:
+    normalized = str(subject_id).strip()
+    digits = "".join(character for character in normalized if character.isdigit())
+    if not digits:
+        raise ValueError(f"Could not derive numeric subject ID from: {subject_id}")
+    width = max(int(min_digits), len(digits))
+    return f"sub{int(digits):0{width}d}"
+
+
+def build_canonical_subject_map(subject_ids: Sequence[str], min_digits: int = 2) -> dict[str, str]:
+    ordered_subjects = [str(subject_id) for subject_id in subject_ids]
+    width = max(int(min_digits), len(str(max(len(ordered_subjects), 1))))
+    return {
+        subject_id: f"sub{index:0{width}d}"
+        for index, subject_id in enumerate(ordered_subjects, start=1)
+    }
+
+
+def make_subject_uid(dataset_name: str, canonical_subject_id: str) -> str:
+    return f"{str(dataset_name).strip()}_{str(canonical_subject_id).strip()}"
+
+
+def normalize_eeg_channel_name(channel_name: str) -> str:
+    normalized = re.sub(r"[^A-Za-z0-9]", "", str(channel_name).strip()).upper()
+    if normalized.startswith("EEG") and len(normalized) > 3:
+        normalized = normalized[3:]
+    return EEG_CHANNEL_ALIAS_MAP.get(normalized, normalized)
+
+
+def build_channel_name_index(channel_names: Sequence[str]) -> dict[str, int]:
+    index_by_name: dict[str, int] = {}
+    duplicates: list[str] = []
+    for index, name in enumerate(channel_names):
+        normalized = normalize_eeg_channel_name(name)
+        if normalized in index_by_name:
+            duplicates.append(normalized)
+            continue
+        index_by_name[normalized] = index
+    if duplicates:
+        raise ValueError(f"Duplicate normalized EEG channel names found: {sorted(set(duplicates))}")
+    return index_by_name
+
+
+def reorder_eeg_channels(data: np.ndarray, channel_names: Sequence[str], target_channel_names: Sequence[str]) -> tuple[np.ndarray, list[dict[str, object]]]:
+    if data.ndim < 2:
+        raise ValueError(f"EEG array must have at least 2 dims [C,...], got {data.shape}")
+    source_index = build_channel_name_index(channel_names)
+    selected_indices: list[int] = []
+    mapping_rows: list[dict[str, object]] = []
+    missing: list[str] = []
+    for target_index, target_name in enumerate(target_channel_names):
+        normalized_target = normalize_eeg_channel_name(target_name)
+        source_channel_index = source_index.get(normalized_target)
+        if source_channel_index is None:
+            missing.append(normalized_target)
+            continue
+        selected_indices.append(source_channel_index)
+        mapping_rows.append(
+            {
+                "target_channel_index": int(target_index),
+                "target_channel_name": str(target_name),
+                "normalized_channel_name": normalized_target,
+                "source_channel_index": int(source_channel_index),
+                "source_channel_name": str(channel_names[source_channel_index]),
+            }
+        )
+    if missing:
+        raise ValueError(f"Missing required EEG channels after normalization: {missing}")
+    return np.asarray(data[selected_indices], dtype=np.float32), mapping_rows
+
+
+def make_channel_metadata_rows(dataset_name: str, channel_names: Sequence[str]) -> list[dict[str, object]]:
+    return [
+        {
+            "dataset": str(dataset_name),
+            "source_channel_index": int(index),
+            "source_channel_name": str(name),
+            "normalized_channel_name": normalize_eeg_channel_name(name),
+        }
+        for index, name in enumerate(channel_names)
+    ]
+
+
+def write_channel_metadata(rows: Sequence[dict[str, object]], output_path: Path) -> None:
+    pd.DataFrame(list(rows)).to_csv(output_path, index=False)
+
+
+def write_subject_mapping(rows: Sequence[dict[str, object]], output_path: Path) -> None:
+    pd.DataFrame(list(rows)).drop_duplicates().to_csv(output_path, index=False)
+
+
+def load_target_channel_names(channel_manifest_path: Path | None) -> list[str] | None:
+    if channel_manifest_path is None:
+        return None
+    manifest = pd.read_csv(channel_manifest_path)
+    if "target_channel_name" in manifest.columns:
+        column = "target_channel_name"
+    elif "channel_name" in manifest.columns:
+        column = "channel_name"
+    elif "normalized_channel_name" in manifest.columns:
+        column = "normalized_channel_name"
+    else:
+        raise ValueError(
+            f"Channel manifest {channel_manifest_path} must contain one of: target_channel_name, channel_name, normalized_channel_name"
+        )
+    return [str(value) for value in manifest[column].dropna().tolist()]
+
+
+def resolve_split_subject_column(manifest: pd.DataFrame) -> str:
+    if "subject_uid" in manifest.columns:
+        return "subject_uid"
+    if "subject" in manifest.columns:
+        return "subject"
+    raise ValueError("Manifest must contain a 'subject' or 'subject_uid' column for subject-wise splitting")
 
 
 def add_dataset_io_args(parser: argparse.ArgumentParser, ds_root_help: str, output_root_help: str) -> None:
@@ -411,10 +540,8 @@ def write_subject_splits(
     test_subjects: int,
 ) -> Path:
     manifest = pd.read_csv(manifest_path)
-    if "subject" not in manifest.columns:
-        raise ValueError("Manifest must contain a 'subject' column for subject-wise splitting")
-
-    subjects = sorted(manifest["subject"].dropna().unique().tolist())
+    subject_column = resolve_split_subject_column(manifest)
+    subjects = sorted(manifest[subject_column].dropna().unique().tolist())
     requested = train_subjects + val_subjects + test_subjects
     if requested > len(subjects):
         raise ValueError(
@@ -437,11 +564,12 @@ def write_subject_splits(
 
     summary_rows: list[dict[str, object]] = []
     for split_name, split_subjects in split_map.items():
-        split_df = manifest[manifest["subject"].isin(split_subjects)].copy()
+        split_df = manifest[manifest[subject_column].isin(split_subjects)].copy()
         split_df.to_csv(output_dir / f"manifest_{split_name}.csv", index=False)
         summary_rows.append(
             {
                 "split": split_name,
+                "subject_column": subject_column,
                 "subjects": ",".join(split_subjects),
                 "num_subjects": len(split_subjects),
                 "num_samples": int(len(split_df)),
@@ -455,10 +583,8 @@ def write_subject_splits(
 
 def write_loso_splits(manifest_path: Path, output_dir: Path, val_subjects: int) -> Path:
     manifest = pd.read_csv(manifest_path)
-    if "subject" not in manifest.columns:
-        raise ValueError("Manifest must contain a 'subject' column for LOSO splitting")
-
-    subjects = sorted(manifest["subject"].dropna().unique().tolist())
+    subject_column = resolve_split_subject_column(manifest)
+    subjects = sorted(manifest[subject_column].dropna().unique().tolist())
     if val_subjects <= 0:
         raise ValueError("val_subjects must be positive")
     if val_subjects >= len(subjects):
@@ -482,12 +608,13 @@ def write_loso_splits(manifest_path: Path, output_dir: Path, val_subjects: int) 
         }
 
         for split_name, split_subjects in split_specs.items():
-            split_df = manifest[manifest["subject"].isin(split_subjects)].copy()
+            split_df = manifest[manifest[subject_column].isin(split_subjects)].copy()
             split_df.to_csv(fold_dir / f"manifest_{split_name}.csv", index=False)
             summary_rows.append(
                 {
                     "fold": fold_name,
                     "split": split_name,
+                    "subject_column": subject_column,
                     "subjects": ",".join(split_subjects),
                     "num_subjects": len(split_subjects),
                     "num_samples": int(len(split_df)),

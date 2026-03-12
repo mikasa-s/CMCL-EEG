@@ -14,9 +14,11 @@ from tqdm import tqdm
 
 from preprocess_common import (
     add_atlas_args,
+    build_canonical_subject_map,
     add_common_fmri_args,
     add_dataset_io_args,
     add_eeg_patch_args,
+    build_channel_name_index,
     add_fmri_roi_resample_args,
     add_subject_args,
     add_subject_packing_and_split_args,
@@ -24,13 +26,19 @@ from preprocess_common import (
     extract_roi_timeseries,
     find_subjects,
     get_atlas_labels_img,
+    load_target_channel_names,
     load_bold_volume,
+    make_channel_metadata_rows,
+    make_subject_uid,
     preprocess_fmri_volume,
     prepare_training_ready_eeg,
     prepare_training_ready_fmri,
+    reorder_eeg_channels,
     resample_fmri_if_needed,
     stack_subject_samples,
+    write_channel_metadata,
     write_subject_memmap_pack,
+    write_subject_mapping,
     write_loso_splits,
     write_subject_splits,
 )
@@ -70,7 +78,10 @@ TRIAL_TYPE_LABEL_NAMES = {
 @dataclass(frozen=True)
 class SampleRecord:
     sample_id: str
+    dataset: str
     subject: str
+    subject_uid: str
+    original_subject: str
     task: str
     trial_type: str
     eeg_path: str
@@ -84,7 +95,10 @@ class SampleRecord:
 
 @dataclass(frozen=True)
 class SubjectRecord:
+    dataset: str
     subject: str
+    subject_uid: str
+    original_subject: str
     subject_path: str
     sample_count: int
     eeg_shape: str
@@ -191,6 +205,12 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Drop ECG and other non-EEG channels when reading the preprocessed BrainVision files.",
     )
+    parser.add_argument(
+        "--target-channel-manifest",
+        type=Path,
+        default=None,
+        help="Optional channel manifest from joint pretraining. When provided, EEG channels are remapped to that exact normalized channel order.",
+    )
     add_subject_packing_and_split_args(
         parser,
         pack_help="Pack all exported samples of the same subject into one directory of memmap-friendly NPY files, so downstream loading is subject-packed.",
@@ -244,13 +264,45 @@ def detect_eeg_protocol_start_sec(raw: mne.io.BaseRaw) -> float:
     raise ValueError("Could not locate EEG protocol start marker S99 or fallback S2 in BrainVision annotations")
 
 
-def load_eeg(eeg_vhdr_path: Path, drop_ecg: bool) -> tuple[np.ndarray, float, float]:
+def load_eeg(eeg_vhdr_path: Path, drop_ecg: bool) -> tuple[np.ndarray, float, float, list[str]]:
     raw = mne.io.read_raw_brainvision(str(eeg_vhdr_path), preload=True, verbose="ERROR")
     protocol_start_sec = detect_eeg_protocol_start_sec(raw)
     if drop_ecg:
         raw = raw.pick("eeg")
     data = raw.get_data().astype(np.float32)
-    return data, float(raw.info["sfreq"]), float(protocol_start_sec)
+    return data, float(raw.info["sfreq"]), float(protocol_start_sec), list(raw.ch_names)
+
+
+def load_eeg_channel_names(eeg_vhdr_path: Path, drop_ecg: bool) -> list[str]:
+    raw = mne.io.read_raw_brainvision(str(eeg_vhdr_path), preload=False, verbose="ERROR")
+    if drop_ecg:
+        raw = raw.pick("eeg")
+    return list(raw.ch_names)
+
+
+def compute_common_eeg_channels(ds_root: Path, subjects: list[str], tasks: list[str], drop_ecg: bool) -> list[str]:
+    common_channels: set[str] | None = None
+    ordered_channels: list[str] = []
+    file_count = 0
+    for subject in subjects:
+        for task in tasks:
+            eeg_vhdr = ds_root / "derivatives" / subject / "eeg_pp" / f"{subject}_task-{task}_eeg_pp.vhdr"
+            if not eeg_vhdr.exists():
+                continue
+            channel_names = load_eeg_channel_names(eeg_vhdr, drop_ecg=drop_ecg)
+            normalized_names = list(build_channel_name_index(channel_names).keys())
+            if common_channels is None:
+                common_channels = set(normalized_names)
+                ordered_channels = normalized_names
+            else:
+                common_channels &= set(normalized_names)
+            file_count += 1
+
+    if file_count == 0:
+        raise RuntimeError("No EEG files found while computing ds002336 channel intersection.")
+    if common_channels is None or not common_channels:
+        raise RuntimeError("No shared EEG channels remain for ds002336 after normalization.")
+    return [channel for channel in ordered_channels if channel in common_channels]
 
 
 def crop_eeg_to_task(data: np.ndarray, task: str, sfreq: float) -> np.ndarray:
@@ -431,7 +483,10 @@ def resolve_binary_label(trial_type: str) -> tuple[int, str]:
 
 def build_sample_record(
     sample_id: str,
+    dataset: str,
     subject: str,
+    subject_uid: str,
+    original_subject: str,
     task: str,
     trial_type: str,
     eeg_rel_path: Path,
@@ -444,7 +499,10 @@ def build_sample_record(
 ) -> SampleRecord:
     return SampleRecord(
         sample_id=sample_id,
+        dataset=dataset,
         subject=subject,
+        subject_uid=subject_uid,
+        original_subject=original_subject,
         task=task,
         trial_type=trial_type,
         eeg_path=eeg_rel_path.as_posix(),
@@ -485,6 +543,10 @@ def main() -> None:
 
     labels_img = get_atlas_labels_img(args.atlas_labels_img, atlas_cache_dir, args.n_rois) if args.fmri_mode == "roi" else ""
     subjects = find_subjects(ds_root, args.subjects)
+    canonical_subject_map = build_canonical_subject_map(subjects)
+    target_channel_names = load_target_channel_names(args.target_channel_manifest.resolve()) if args.target_channel_manifest is not None else None
+    if target_channel_names is None:
+        target_channel_names = compute_common_eeg_channels(ds_root, subjects, list(args.tasks), drop_ecg=bool(args.drop_ecg))
     fmri_discard_initial_trs = int(args.discard_initial_trs)
     protocol_offset_sec = float(args.protocol_offset_sec)
     if args.fmri_source != "raw":
@@ -505,7 +567,20 @@ def main() -> None:
     subject_records: list[SubjectRecord] = []
     skipped_blocks: list[SkippedBlockRecord] = []
     missing_pairs: list[MissingPairRecord] = []
+    subject_mapping_rows: list[dict[str, object]] = []
+    dataset_channel_rows: list[dict[str, object]] = []
+    channel_mapping_rows: list[dict[str, object]] = []
     for subject in tqdm(subjects, desc="Preparing ds002336"):
+        canonical_subject = canonical_subject_map[subject]
+        subject_uid = make_subject_uid("ds002336", canonical_subject)
+        subject_mapping_rows.append(
+            {
+                "dataset": "ds002336",
+                "original_subject": subject,
+                "subject": canonical_subject,
+                "subject_uid": subject_uid,
+            }
+        )
         packed_eeg_samples: list[np.ndarray] = []
         packed_fmri_samples: list[np.ndarray] = []
         packed_labels: list[int] = []
@@ -533,7 +608,13 @@ def main() -> None:
                 )
                 continue
 
-            eeg, sfreq, eeg_protocol_start_sec = load_eeg(eeg_vhdr, drop_ecg=args.drop_ecg)
+            eeg, sfreq, eeg_protocol_start_sec, eeg_channel_names = load_eeg(eeg_vhdr, drop_ecg=args.drop_ecg)
+            if not dataset_channel_rows:
+                dataset_channel_rows.extend(make_channel_metadata_rows("ds002336", eeg_channel_names))
+            eeg, current_channel_mapping = reorder_eeg_channels(eeg, eeg_channel_names, target_channel_names)
+            if not channel_mapping_rows:
+                for row in current_channel_mapping:
+                    channel_mapping_rows.append({"dataset": "ds002336", **row})
             if args.sample_mode == "run":
                 eeg = crop_eeg_to_task(eeg, task, sfreq=sfreq)
                 if args.eeg_mode == "patched":
@@ -579,7 +660,7 @@ def main() -> None:
                     )
                 fmri = prepare_training_ready_fmri(fmri, fmri_mode=args.fmri_mode, enabled=bool(args.training_ready))
 
-                sample_id = f"{subject}_{task}"
+                sample_id = f"ds002336_{canonical_subject}_{task}"
                 if args.pack_subject_files:
                     packed_eeg_samples.append(eeg.astype(np.float32))
                     packed_fmri_samples.append(fmri.astype(np.float32))
@@ -596,7 +677,10 @@ def main() -> None:
                     records.append(
                         build_sample_record(
                             sample_id=sample_id,
-                            subject=subject,
+                            dataset="ds002336",
+                            subject=canonical_subject,
+                            subject_uid=subject_uid,
+                            original_subject=subject,
                             task=task,
                             trial_type=task,
                             eeg_rel_path=eeg_out_path.relative_to(out_root),
@@ -694,7 +778,7 @@ def main() -> None:
                     label = TASK_LABELS[task]
                     label_name = task
 
-                sample_id = f"{subject}_{task}_block-{block_idx:02d}"
+                sample_id = f"ds002336_{canonical_subject}_{task}_block-{block_idx:02d}"
                 if args.pack_subject_files:
                     packed_eeg_samples.append(eeg_block.astype(np.float32))
                     packed_fmri_samples.append(fmri_block.astype(np.float32))
@@ -711,7 +795,10 @@ def main() -> None:
                     records.append(
                         build_sample_record(
                             sample_id=sample_id,
-                            subject=subject,
+                            dataset="ds002336",
+                            subject=canonical_subject,
+                            subject_uid=subject_uid,
+                            original_subject=subject,
                             task=task,
                             trial_type=trial_type,
                             eeg_rel_path=eeg_out_path.relative_to(out_root),
@@ -733,7 +820,7 @@ def main() -> None:
             packed_trial_types_array = np.asarray(packed_trial_types)
 
             subject_path = write_subject_memmap_pack(
-                packed_out_dir / subject,
+                packed_out_dir / subject_uid,
                 {
                     "eeg": packed_eeg,
                     "fmri": packed_fmri,
@@ -745,7 +832,10 @@ def main() -> None:
             )
             subject_records.append(
                 SubjectRecord(
-                    subject=subject,
+                    dataset="ds002336",
+                    subject=canonical_subject,
+                    subject_uid=subject_uid,
+                    original_subject=subject,
                     subject_path=subject_path.relative_to(out_root).as_posix(),
                     sample_count=int(packed_labels_array.shape[0]),
                     eeg_shape="x".join(str(dim) for dim in packed_eeg.shape),
@@ -767,6 +857,16 @@ def main() -> None:
     if missing_pairs:
         pd.DataFrame(record.__dict__ for record in missing_pairs).to_csv(out_root / "missing_pairs.csv", index=False)
         print(f"Skipped {len(missing_pairs)} subject-task pairs because EEG/fMRI files were not both present.")
+    write_subject_mapping(subject_mapping_rows, out_root / "subject_mapping.csv")
+    write_channel_metadata(dataset_channel_rows, out_root / "eeg_channels_dataset.csv")
+    write_channel_metadata(
+        [
+            {"target_channel_index": index, "target_channel_name": channel_name}
+            for index, channel_name in enumerate(target_channel_names)
+        ],
+        out_root / "eeg_channels_target.csv",
+    )
+    write_channel_metadata(channel_mapping_rows, out_root / "eeg_channel_mapping.csv")
 
     if args.split_mode == "subject":
         split_dir = args.split_output_dir.resolve() if args.split_output_dir else (out_root / "splits_subjectwise")

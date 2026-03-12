@@ -125,10 +125,15 @@ def _validate_manifest_shapes(
         fmri_shape = fmri_shape[1:]
 
     expected_eeg_shape = _normalize_expected_shape(data_cfg.get("expected_eeg_shape"))
-    if expected_eeg_shape is not None and eeg_shape is not None and eeg_shape != expected_eeg_shape:
-        raise ValueError(
-            f"EEG shape mismatch: manifest sample is {eeg_shape}, but data.expected_eeg_shape is {expected_eeg_shape}"
-        )
+    if expected_eeg_shape is not None and eeg_shape is not None:
+        if len(expected_eeg_shape) != len(eeg_shape):
+            raise ValueError(
+                f"EEG shape rank mismatch: manifest sample is {eeg_shape}, but data.expected_eeg_shape is {expected_eeg_shape}"
+            )
+        if len(eeg_shape) >= 2 and tuple(eeg_shape[1:]) != tuple(expected_eeg_shape[1:]):
+            raise ValueError(
+                f"EEG patch shape mismatch: manifest sample trailing dims are {eeg_shape[1:]}, but data.expected_eeg_shape expects {expected_eeg_shape[1:]}"
+            )
 
     expected_fmri_shape = _normalize_expected_shape(data_cfg.get("expected_fmri_shape"))
     if expected_fmri_shape is not None and fmri_shape is not None and fmri_shape != expected_fmri_shape:
@@ -261,8 +266,8 @@ class TrainConfig:
             if section_name not in self.raw:
                 raise ValueError(f"Missing required config section: {section_name}")
 
-        # 对比学习和微调都依赖训练集 manifest，因此这里先统一检查。
-        manifest_value = str(data_cfg.get("train_manifest_csv", data_cfg.get("manifest_csv", "")))
+        # 对比学习使用单一 manifest；微调仍使用 train/val/test manifests。
+        manifest_value = str(data_cfg.get("manifest_csv", data_cfg.get("train_manifest_csv", "")))
         manifest_path = root / manifest_value
         if not manifest_path.exists():
             raise FileNotFoundError(f"Manifest CSV not found: {manifest_path}")
@@ -271,14 +276,6 @@ class TrainConfig:
         root_dir = (root / root_dir_value) if root_dir_value else None
         if root_dir is not None and not root_dir.exists():
             raise FileNotFoundError(f"Dataset root_dir not found: {root_dir}")
-
-        for split_key in ["val_manifest_csv", "test_manifest_csv"]:
-            split_value = data_cfg.get(split_key, "")
-            split_path = "" if split_value is None else str(split_value).strip()
-            if split_path:
-                resolved = root / split_path
-                if not resolved.exists():
-                    raise FileNotFoundError(f"Manifest CSV not found: {resolved}")
 
         for checkpoint_key, cfg_section in [("EEG", eeg_cfg), ("fMRI", fmri_cfg)]:
             checkpoint_path = str(cfg_section.get("checkpoint_path", "")).strip()
@@ -295,6 +292,13 @@ class TrainConfig:
 
         if "finetune" in self.raw:
             finetune_cfg = self.section("finetune")
+            for split_key in ["train_manifest_csv", "val_manifest_csv", "test_manifest_csv"]:
+                split_value = data_cfg.get(split_key, "")
+                split_path = "" if split_value is None else str(split_value).strip()
+                if split_path:
+                    resolved = root / split_path
+                    if not resolved.exists():
+                        raise FileNotFoundError(f"Manifest CSV not found: {resolved}")
             if "num_classes" not in finetune_cfg:
                 raise ValueError("Missing finetune.num_classes in config")
             selection_metric = str(finetune_cfg.get("selection_metric", "accuracy")).strip().lower()

@@ -11,7 +11,8 @@ param(
     [int]$TestSubjects = 1,
     [double]$EegWindowSec = 2.0,
     [double]$FmriWindowSec = 6.0,
-    [bool]$TrainingReady = $true
+    [bool]$TrainingReady = $true,
+    [string]$TargetChannelManifest = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -66,6 +67,10 @@ if ($TrainingReady) {
 }
 else {
     $cliArgs += "--no-training-ready"
+}
+
+if ($TargetChannelManifest.Trim()) {
+    $cliArgs += @("--target-channel-manifest", $TargetChannelManifest)
 }
 
 if ($Subjects.Count -gt 0) {
