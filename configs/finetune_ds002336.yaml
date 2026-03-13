@@ -13,7 +13,8 @@ data:
   test_manifest_csv: cache/ds002336/loso_subjectwise/fold_ds002336_sub01/manifest_test.csv
   root_dir: cache/ds002336
   preload_dataset: true
-  expected_eeg_shape: [63, 20, 200]
+  eeg_channel_subset: auto
+  expected_eeg_shape: [63, 8, 200]
   expected_fmri_shape: [48, 48, 48, 10]
   normalize_eeg: true
   normalize_fmri: true

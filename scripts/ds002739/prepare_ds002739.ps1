@@ -9,17 +9,28 @@ param(
     [int]$TrainSubjects = 21,
     [int]$ValSubjects = 2,
     [int]$TestSubjects = 1,
-    [double]$EegWindowSec = 2.0,
+    [double]$EegWindowSec = 8.0,
     [double]$FmriWindowSec = 6.0,
-    [bool]$TrainingReady = $true,
-    [string]$TargetChannelManifest = ""
+    [int]$EegSeqLen = 0,
+    [switch]$TrainingReady,
+    [switch]$EegOnly,
+    [string]$TargetChannelManifest = "",
+    [string]$PythonExe = ""
 )
 
 $ErrorActionPreference = "Stop"
 
+if (-not $PSBoundParameters.ContainsKey("TrainingReady")) {
+    $TrainingReady = $true
+}
+if (-not $PSBoundParameters.ContainsKey("EegOnly")) {
+    $EegOnly = $true
+}
+
 Set-Location (Resolve-Path (Join-Path $PSScriptRoot "..\.."))
 
-$python = "python"
+$python = if ($PythonExe.Trim()) { $PythonExe } else { "python" }
+$resolvedEegSeqLen = if ($EegSeqLen -gt 0) { $EegSeqLen } else { [Math]::Max(1, [int][Math]::Round($EegWindowSec)) }
 
 if ($SplitMode -ne "none" -and $Subjects.Count -gt 0) {
     $requiredSubjects = if ($SplitMode -eq "loso") { $ValSubjects + 1 } else { $TrainSubjects + $ValSubjects + $TestSubjects }
@@ -38,7 +49,7 @@ $cliArgs = @(
     "--pack-subject-files",
     "--eeg-window-sec", $EegWindowSec.ToString(),
     "--fmri-window-sec", $FmriWindowSec.ToString(),
-    "--eeg-seq-len", "2",
+    "--eeg-seq-len", $resolvedEegSeqLen.ToString(),
     "--eeg-patch-len", "200",
     "--eeg-target-sfreq", "200",
     "--eeg-lfreq", "0.5",
@@ -67,6 +78,10 @@ if ($TrainingReady) {
 }
 else {
     $cliArgs += "--no-training-ready"
+}
+
+if ($EegOnly) {
+    $cliArgs += "--eeg-only"
 }
 
 if ($TargetChannelManifest.Trim()) {

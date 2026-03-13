@@ -1,7 +1,7 @@
 param(
-    [ValidateSet("ds002336", "ds002739")]
+    [ValidateSet("ds002336", "ds002338", "ds002739")]
     [string[]]$PretrainDatasets = @("ds002336", "ds002739"),
-    [ValidateSet("ds002336", "ds002739")]
+    [ValidateSet("ds002336", "ds002338", "ds002739")]
     [string]$TargetDataset = "ds002739",
     [string]$JointTrainConfig = "configs/train_joint_contrastive.yaml",
     [string]$FinetuneConfig = "configs/finetune_ds002739.yaml",
@@ -30,6 +30,7 @@ else {
 
 $jointCacheRoot = Join-Path $resolvedOutputRoot "cache\joint_contrastive"
 $ds002336CacheRoot = Join-Path $resolvedOutputRoot "cache\ds002336"
+$ds002338CacheRoot = Join-Path $resolvedOutputRoot "cache\ds002338"
 $ds002739CacheRoot = Join-Path $resolvedOutputRoot "cache\ds002739"
 $sharedOutputRoot = $resolvedOutputRoot
 
@@ -44,9 +45,11 @@ $args += @(
     "-JointTrainConfig", $JointTrainConfig,
     "-JointCacheRoot", $jointCacheRoot,
     "-Ds002336CacheRoot", $ds002336CacheRoot,
+    "-Ds002338CacheRoot", $ds002338CacheRoot,
     "-Ds002739CacheRoot", $ds002739CacheRoot,
     "-JointOutputRoot", $sharedOutputRoot,
     "-Ds002336OutputRoot", $sharedOutputRoot,
+    "-Ds002338OutputRoot", $sharedOutputRoot,
     "-Ds002739OutputRoot", $sharedOutputRoot,
     "-JointEegWindowSec", $JointEegWindowSec.ToString()
 )

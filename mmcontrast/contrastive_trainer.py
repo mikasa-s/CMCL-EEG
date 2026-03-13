@@ -41,9 +41,18 @@ class ContrastiveTrainer:
             pin_memory=bool(train_cfg.get("pin_memory", True)),
         )
 
+        if is_main_process():
+            train_eeg_shape, train_fmri_shape = self.describe_loader_modal_shapes(self.train_loader)
+            print(
+                "Dataset train shapes for pretrain: "
+                f"eeg={train_eeg_shape}, fmri={train_fmri_shape}",
+                flush=True,
+            )
+
         self.model = self.build_model(cfg)
         if is_main_process():
             total_params, trainable_params = self.count_parameters(self.model)
+            # frozen_params = self.list_frozen_parameters(self.model)
             runtime = runtime_summary(train_cfg, self.device, self.world_size)
             print(
                 "Runtime: "
@@ -55,6 +64,10 @@ class ContrastiveTrainer:
                 f"cudnn_benchmark={runtime['cudnn_benchmark']}"
             )
             print(f"Model params: total={total_params:,}, trainable={trainable_params:,}")
+            # if frozen_params:
+            #     frozen_total = sum(item[1] for item in frozen_params)
+            #     frozen_desc = "; ".join([f"{name} ({count})" for name, count in frozen_params])
+            #     print(f"Non-trainable params: total={frozen_total:,}; {frozen_desc}")
         if is_dist_initialized():
             # 只有真正进入分布式模式时才包装 DDP。
             self.model = DDP(
@@ -100,6 +113,32 @@ class ContrastiveTrainer:
         total = sum(param.numel() for param in model.parameters())
         trainable = sum(param.numel() for param in model.parameters() if param.requires_grad)
         return total, trainable
+
+    @staticmethod
+    def list_frozen_parameters(model: torch.nn.Module) -> list[tuple[str, int]]:
+        return [(name, int(param.numel())) for name, param in model.named_parameters() if not param.requires_grad]
+
+    @staticmethod
+    def describe_loader_modal_shapes(loader: DataLoader | None) -> tuple[str, str]:
+        if loader is None:
+            return "None", "None"
+        dataset = loader.dataset
+        sample_count = len(dataset)
+        if sample_count == 0:
+            return "[0]", "[0]"
+        try:
+            sample = dataset[0]
+        except Exception as exc:
+            unavailable = f"unavailable({exc})"
+            return unavailable, unavailable
+        if not isinstance(sample, dict):
+            return "None", "None"
+
+        eeg = sample.get("eeg")
+        fmri = sample.get("fmri")
+        eeg_shape = str([sample_count, *(list(eeg.shape) if hasattr(eeg, "shape") else [])]) if eeg is not None else "None"
+        fmri_shape = str([sample_count, *(list(fmri.shape) if hasattr(fmri, "shape") else [])]) if fmri is not None else "None"
+        return eeg_shape, fmri_shape
 
     def resolve_path(self, path_str: str) -> Path:
         """把相对路径统一转成基于项目根目录的绝对路径。"""

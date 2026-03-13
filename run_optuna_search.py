@@ -22,6 +22,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--study-name", type=str, default="", help="Override study.name from YAML.")
     parser.add_argument("--output-dir", type=str, default="", help="Override study.output_dir from YAML.")
     parser.add_argument("--fail-fast", action="store_true", help="Stop immediately when a trial command fails.")
+    parser.add_argument("--dry-run", action="store_true", help="Validate study config wiring and print resolved command/runtime paths without launching trials.")
     return parser.parse_args()
 
 
@@ -110,6 +111,14 @@ def normalize_study_config(raw: dict[str, Any], args: argparse.Namespace, config
         raise ValueError("study.command must be a non-empty string list")
     if not normalized["output_arg"]:
         raise ValueError("study.output_arg must be configured")
+
+    command_exe = normalized["command"][0]
+    if not command_exe:
+        raise ValueError("study.command[0] is empty")
+    for key in ["train_base", "finetune_base"]:
+        cfg_path = normalized["runtime_configs"].get(key)
+        if cfg_path is not None and not Path(cfg_path).exists():
+            raise FileNotFoundError(f"runtime_configs.{key} not found: {cfg_path}")
     return normalized
 
 
@@ -184,6 +193,23 @@ def main() -> None:
     args = parse_args()
     study_config_path = resolve_path(args.study_config, base_dir=PROJECT_ROOT)
     study_cfg = normalize_study_config(load_yaml(study_config_path), args, study_config_path)
+
+    if args.dry_run:
+        summary = {
+            "study_name": study_cfg["study_name"],
+            "mode": args.mode or "default",
+            "command": study_cfg["command"] + study_cfg["static_args"],
+            "cwd": str(study_cfg["cwd"]),
+            "output_arg": study_cfg["output_arg"],
+            "metric": study_cfg["metric"],
+            "runtime_configs": {
+                key: (str(value) if value is not None else None)
+                for key, value in study_cfg["runtime_configs"].items()
+            },
+            "parameter_names": sorted(study_cfg["parameters"].keys()),
+        }
+        print(json.dumps(summary, ensure_ascii=False, indent=2))
+        return
 
     try:
         import optuna

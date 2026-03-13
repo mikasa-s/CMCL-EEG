@@ -1,18 +1,22 @@
 param(
-    [ValidateSet("ds002336", "ds002739")]
-    [string[]]$PretrainDatasets = @("ds002336", "ds002739"),
-    [ValidateSet("ds002336", "ds002739")]
+    [ValidateSet("ds002336", "ds002338", "ds002739")]
+    [string[]]$PretrainDatasets = @("ds002336", "ds002338", "ds002739"),
+    [ValidateSet("ds002336", "ds002338", "ds002739")]
     [string]$TargetDataset = "ds002739",
     [string]$JointTrainConfig = "configs/train_joint_contrastive.yaml",
     [string]$Ds002336FinetuneConfig = "configs/finetune_ds002336.yaml",
+    [string]$Ds002338FinetuneConfig = "configs/finetune_ds002338.yaml",
     [string]$Ds002739FinetuneConfig = "configs/finetune_ds002739.yaml",
     [string]$Ds002336Root = "../ds002336",
+    [string]$Ds002338Root = "../ds002338",
     [string]$Ds002739Root = "../ds002739",
     [string]$JointCacheRoot = "cache/joint_contrastive",
     [string]$Ds002336CacheRoot = "cache/ds002336",
+    [string]$Ds002338CacheRoot = "cache/ds002338",
     [string]$Ds002739CacheRoot = "cache/ds002739",
     [string]$JointOutputRoot = "outputs/joint_contrastive",
     [string]$Ds002336OutputRoot = "outputs/ds002336",
+    [string]$Ds002338OutputRoot = "outputs/ds002338",
     [string]$Ds002739OutputRoot = "outputs/ds002739",
     [double]$JointEegWindowSec = 8.0,
     [int]$PretrainEpochs = 0,
@@ -78,6 +82,38 @@ function Read-JsonFile {
     return Get-Content -Path $Path -Raw | ConvertFrom-Json
 }
 
+function Test-JointCacheReady {
+    param([Parameter(Mandatory = $true)][string]$CacheRoot)
+
+    $manifestPath = Join-Path $CacheRoot "manifest_all.csv"
+    return (Test-Path $manifestPath)
+}
+
+function Test-TargetCacheReady {
+    param([Parameter(Mandatory = $true)][string]$CacheRoot)
+
+    $losoRoot = Join-Path $CacheRoot "loso_subjectwise"
+    if (!(Test-Path $losoRoot)) {
+        return $false
+    }
+
+    $foldDirs = Get-ChildItem -Path $losoRoot -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -like "fold_*" }
+    if ($null -eq $foldDirs -or $foldDirs.Count -eq 0) {
+        return $false
+    }
+
+    foreach ($foldDir in $foldDirs) {
+        $trainManifest = Join-Path $foldDir.FullName "manifest_train.csv"
+        $valManifest = Join-Path $foldDir.FullName "manifest_val.csv"
+        $testManifest = Join-Path $foldDir.FullName "manifest_test.csv"
+        if (!(Test-Path $trainManifest) -or !(Test-Path $valManifest) -or !(Test-Path $testManifest)) {
+            return $false
+        }
+    }
+
+    return $true
+}
+
 function Write-FinetuneSummary {
     param(
         [Parameter(Mandatory = $true)][string]$FinetuneRoot,
@@ -126,7 +162,7 @@ function Write-FinetuneSummary {
 }
 
 $ErrorActionPreference = "Stop"
-Set-Location (Resolve-Path (Join-Path $PSScriptRoot ".."))
+$repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
 
 if ($SkipPretrain -and $SkipFinetune) {
     throw "SkipPretrain and SkipFinetune cannot both be set"
@@ -136,26 +172,40 @@ if ($TestOnly -and $SkipFinetune) {
     throw "TestOnly requires the finetune stage and cannot be combined with SkipFinetune"
 }
 
-$python = if ($env:PYTHON_EXE) { $env:PYTHON_EXE } else { "python" }
+if ($env:CONDA_PREFIX) {
+    $python = Join-Path $env:CONDA_PREFIX "python.exe"
+}
+else {
+    $python = "python"
+}
 $jointManifestPath = Join-Path $JointCacheRoot "manifest_all.csv"
 $jointChannelManifest = Join-Path $JointCacheRoot "eeg_channels_target.csv"
 $jointCheckpointPath = Join-Path $JointOutputRoot "contrastive\checkpoints\best.pth"
 
 if (!$SkipPretrain) {
-    $jointPrepareArgs = @(
-        "-ExecutionPolicy", "Bypass",
-        "-File", "scripts/prepare_joint_contrastive.ps1",
-        "-OutputRoot", $JointCacheRoot,
-        "-EegWindowSec", $JointEegWindowSec.ToString()
-    )
-    if ($PretrainDatasets.Count -gt 0) {
-        $jointPrepareArgs += "-Datasets"
-        $jointPrepareArgs += $PretrainDatasets
+    if (Test-JointCacheReady -CacheRoot $JointCacheRoot) {
+        Write-Host ("Found existing joint cache under " + $JointCacheRoot + "; skipping preprocessing.")
     }
-    $jointPrepareArgs += @("-Ds002336Root", $Ds002336Root, "-Ds002739Root", $Ds002739Root)
+    else {
+        $jointPrepareArgs = @(
+            "-ExecutionPolicy", "Bypass",
+            "-File", (Join-Path $repoRoot "scripts/prepare_joint_contrastive.ps1"),
+            "-OutputRoot", $JointCacheRoot,
+            "-EegWindowSec", $JointEegWindowSec.ToString(),
+            "-PythonExe", $python
+        )
+        if ($PretrainDatasets.Count -gt 0) {
+            $jointPrepareArgs += "-Datasets"
+            $jointPrepareArgs += $PretrainDatasets
+        }
+        if ($NumWorkers -ge 1) {
+            $jointPrepareArgs += @("-NumWorkers", $NumWorkers.ToString())
+        }
+        $jointPrepareArgs += @("-Ds002336Root", $Ds002336Root, "-Ds002338Root", $Ds002338Root, "-Ds002739Root", $Ds002739Root)
 
-    Write-Host "Preparing joint contrastive cache..."
-    Invoke-CommandOrThrow -Executable "powershell" -Args $jointPrepareArgs -StepName "joint preprocessing"
+        Write-Host "Preparing joint contrastive cache..."
+        Invoke-CommandOrThrow -Executable "powershell" -Args $jointPrepareArgs -StepName "joint preprocessing"
+    }
 
     $trainArgs = @(
         "run_train.py",
@@ -164,6 +214,7 @@ if (!$SkipPretrain) {
         "--root-dir", $JointCacheRoot,
         "--output-dir", (Join-Path $JointOutputRoot "contrastive")
     )
+    $trainArgs[0] = (Join-Path $repoRoot "run_train.py")
     if ($PretrainEpochs -gt 0) {
         $trainArgs += @("--epochs", $PretrainEpochs.ToString())
     }
@@ -185,30 +236,40 @@ if ($SkipFinetune) {
     return
 }
 
-$targetPrepareScript = if ($TargetDataset -eq "ds002336") { "scripts/ds002336/prepare_ds002336.ps1" } else { "scripts/ds002739/prepare_ds002739.ps1" }
-$targetFinetuneConfig = if ($TargetDataset -eq "ds002336") { $Ds002336FinetuneConfig } else { $Ds002739FinetuneConfig }
-$targetCacheRoot = if ($TargetDataset -eq "ds002336") { $Ds002336CacheRoot } else { $Ds002739CacheRoot }
-$targetOutputRoot = if ($TargetDataset -eq "ds002336") { $Ds002336OutputRoot } else { $Ds002739OutputRoot }
+$targetPrepareScript = if ($TargetDataset -eq "ds002336" -or $TargetDataset -eq "ds002338") { "scripts/ds00233x/prepare_ds00233x.ps1" } else { "scripts/ds002739/prepare_ds002739.ps1" }
+$targetFinetuneConfig = if ($TargetDataset -eq "ds002336") { $Ds002336FinetuneConfig } elseif ($TargetDataset -eq "ds002338") { $Ds002338FinetuneConfig } else { $Ds002739FinetuneConfig }
+$targetCacheRoot = if ($TargetDataset -eq "ds002336") { $Ds002336CacheRoot } elseif ($TargetDataset -eq "ds002338") { $Ds002338CacheRoot } else { $Ds002739CacheRoot }
+$targetOutputRoot = if ($TargetDataset -eq "ds002336") { $Ds002336OutputRoot } elseif ($TargetDataset -eq "ds002338") { $Ds002338OutputRoot } else { $Ds002739OutputRoot }
 
-$targetPrepareArgs = @(
-    "-ExecutionPolicy", "Bypass",
-    "-File", $targetPrepareScript,
-    "-OutputRoot", $targetCacheRoot,
-    "-SplitMode", "loso",
-    "-TrainingReady:$true"
-)
-if (Test-Path $jointChannelManifest) {
-    $targetPrepareArgs += @("-TargetChannelManifest", $jointChannelManifest)
-}
-if ($TargetDataset -eq "ds002336") {
-    $targetPrepareArgs += @("-DsRoot", $Ds002336Root)
+if (Test-TargetCacheReady -CacheRoot $targetCacheRoot) {
+    Write-Host ("Found existing target cache under " + $targetCacheRoot + "; skipping preprocessing.")
 }
 else {
-    $targetPrepareArgs += @("-DsRoot", $Ds002739Root)
-}
+    $targetPrepareArgs = @(
+        "-ExecutionPolicy", "Bypass",
+        "-File", (Join-Path $repoRoot $targetPrepareScript),
+        "-OutputRoot", $targetCacheRoot,
+        "-SplitMode", "loso",
+        "-TrainingReady",
+        "-EegOnly",
+        "-PythonExe", $python
+    )
+    if (Test-Path $jointChannelManifest) {
+        $targetPrepareArgs += @("-TargetChannelManifest", $jointChannelManifest)
+    }
+    if ($TargetDataset -eq "ds002336") {
+        $targetPrepareArgs += @("-DatasetName", "ds002336", "-DsRoot", $Ds002336Root)
+    }
+    elseif ($TargetDataset -eq "ds002338") {
+        $targetPrepareArgs += @("-DatasetName", "ds002338", "-DsRoot", $Ds002338Root)
+    }
+    else {
+        $targetPrepareArgs += @("-DsRoot", $Ds002739Root)
+    }
 
-Write-Host ("Preparing target finetune cache for " + $TargetDataset + "...")
-Invoke-CommandOrThrow -Executable "powershell" -Args $targetPrepareArgs -StepName "target preprocessing"
+    Write-Host ("Preparing target finetune cache for " + $TargetDataset + "...")
+    Invoke-CommandOrThrow -Executable "powershell" -Args $targetPrepareArgs -StepName "target preprocessing"
+}
 
 $losoDir = Join-Path $targetCacheRoot "loso_subjectwise"
 $foldDirs = Get-ChildItem -Path $losoDir -Directory | Where-Object { $_.Name -like "fold_*" } | Sort-Object Name
@@ -236,7 +297,7 @@ foreach ($foldDir in $foldDirs) {
     }
 
     $finetuneArgs = @(
-        "run_finetune.py",
+        (Join-Path $repoRoot "run_finetune.py"),
         "--config", $targetFinetuneConfig,
         "--train-manifest", $trainManifest,
         "--val-manifest", $valManifest,

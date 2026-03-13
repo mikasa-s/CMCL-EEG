@@ -1,5 +1,6 @@
-function run_spm_preproc_xp1(subject_ids, task_names)
-% SPM12 preprocessing for ds002336 (XP1).
+function run_spm_preproc_ds00233x(subject_ids, task_names, dataset_root, parallel_workers)
+
+% SPM12 preprocessing for XP-style datasets (ds002336 / ds002338).
 % Steps:
 % 1) discard initial lead-in volumes
 % 2) slice timing correction using BIDS JSON SliceTiming
@@ -16,11 +17,19 @@ function run_spm_preproc_xp1(subject_ids, task_names)
 %   spm_jobman('initcfg');
 %
 % Usage:
-%   run_spm_preproc_xp1()
-%   run_spm_preproc_xp1('sub-xp101', 'task-eegfmriNF')
-%   run_spm_preproc_xp1({'sub-xp101','sub-xp102'}, {'task-eegNF','task-fmriNF'})
+%   run_spm_preproc_ds00233x()
+%   run_spm_preproc_ds00233x('sub-xp101', 'task-eegfmriNF')
+%   run_spm_preproc_ds00233x({'sub-xp101','sub-xp102'}, {'task-eegNF','task-fmriNF'}, 'D:\OpenNeuro\ds002338', 4)
 
-    root_dir = 'D:\OpenNeuro\ds002336';
+    if nargin < 4 || isempty(parallel_workers)
+        parallel_workers = 1;
+    end
+
+    if nargin < 3 || isempty(dataset_root)
+        root_dir = 'D:\OpenNeuro\ds002336';
+    else
+        root_dir = char(dataset_root);
+    end
     output_root = fullfile(root_dir, 'derivatives', 'spm12_preproc');
 
     % Dataset README says the scanner started 2 s before protocol onset.
@@ -58,78 +67,30 @@ function run_spm_preproc_xp1(subject_ids, task_names)
     spm('Defaults', 'fMRI');
     spm_jobman('initcfg');
 
-    for subject_index = 1:numel(subject_ids)
-        subject_id = subject_ids{subject_index};
-        subject_tasks = resolve_subject_tasks(root_dir, subject_id, task_names);
-        if isempty(subject_tasks)
-            fprintf('No matching tasks found for %s. Skipping.\n', subject_id);
-            continue;
+    has_parallel = (exist('gcp', 'file') == 2) && (exist('parpool', 'file') == 2);
+
+    if parallel_workers > 1 && numel(subject_ids) > 1 && has_parallel
+        pool = gcp('nocreate');
+        if isempty(pool)
+            parpool(parallel_workers);
+        elseif pool.NumWorkers ~= parallel_workers
+            delete(pool);
+            parpool(parallel_workers);
         end
 
-        anat_dir = fullfile(root_dir, subject_id, 'anat');
-        anat_file = find_one_file(anat_dir, sprintf('%s*_T1w.nii', subject_id), sprintf('%s*_T1w.nii.gz', subject_id));
-
-        for task_index = 1:numel(subject_tasks)
-            task_name = subject_tasks{task_index};
-            fprintf('\n[%d/%d] %s %s\n', task_index, numel(subject_tasks), subject_id, task_name);
-
-            func_dir = fullfile(root_dir, subject_id, 'func');
-            func_file = find_one_file(func_dir, sprintf('%s_%s*_bold.nii', subject_id, task_name), sprintf('%s_%s*_bold.nii.gz', subject_id, task_name));
-            func_json = find_one_file(func_dir, sprintf('%s_%s*_bold.json', subject_id, task_name), '');
-
-            meta = read_json_file(func_json);
-            TR = get_required_scalar(meta, 'RepetitionTime');
-            slice_timing = get_required_vector(meta, 'SliceTiming');
-            num_slices = numel(slice_timing);
-            acquisition_time = max(slice_timing) - min(slice_timing);
-            nominal_ref_timing = median(slice_timing);
-            [~, ref_slice_index] = min(abs(slice_timing - nominal_ref_timing));
-            ref_slice_timing = slice_timing(ref_slice_index);
-
-            subject_out_dir = fullfile(output_root, subject_id);
-            task_work_dir = fullfile(subject_out_dir, ['_tmp_' task_name]);
-            if ~exist(subject_out_dir, 'dir')
-                mkdir(subject_out_dir);
-            end
-            if ~exist(task_work_dir, 'dir')
-                mkdir(task_work_dir);
-            end
-
-            staged_func = stage_nifti(func_file, task_work_dir, overwrite_existing);
-            staged_anat = stage_nifti(anat_file, task_work_dir, overwrite_existing);
-            trimmed_func = discard_initial_volumes(staged_func, n_discard, overwrite_existing);
-
-            scans = build_scan_list(trimmed_func);
-            a_scans = add_prefix_to_scans(scans, 'a');
-            ra_scans = add_prefix_to_scans(a_scans, 'r');
-            wa_ra_scans = add_prefix_to_scans(ra_scans, 'w');
-            mean_epi = mean_image_path(trimmed_func, 'a');
-
-            [~, anat_name, anat_ext] = fileparts(staged_anat);
-            deformation_field = fullfile(task_work_dir, ['y_' anat_name anat_ext]);
-
-            fprintf('  Functional: %s\n', staged_func);
-            fprintf('  Anatomical: %s\n', staged_anat);
-            fprintf('  JSON TR: %.4f s\n', TR);
-            fprintf('  JSON slices: %d\n', num_slices);
-            fprintf('  JSON SliceTiming: %s\n', mat2str(slice_timing));
-            fprintf('  JSON TA: %.4f s\n', acquisition_time);
-            fprintf('  Reference slice index: %d\n', ref_slice_index);
-            fprintf('  Reference slice timing: %.4f s\n', ref_slice_timing);
-
-            run_stage_one_batch(scans, a_scans, mean_epi, staged_anat, TR, acquisition_time, num_slices, slice_timing, ref_slice_timing, task_work_dir, subject_id, task_name);
-
-            if ~isfile(deformation_field)
-                error('SPM segmentation did not produce deformation field: %s', deformation_field);
-            end
-
-            run_stage_two_batch(deformation_field, staged_anat, ra_scans, wa_ra_scans, smooth_fwhm, normalize_vox, normalize_bb, task_work_dir, subject_id, task_name);
-            final_fmri = finalize_task_outputs(subject_out_dir, task_work_dir, subject_id, task_name, overwrite_existing);
-            fprintf('  Final model-ready fMRI: %s\n', final_fmri);
+        parfor subject_index = 1:numel(subject_ids)
+            process_subject_spm(root_dir, output_root, subject_ids{subject_index}, task_names, n_discard, smooth_fwhm, normalize_vox, normalize_bb, overwrite_existing);
+        end
+    else
+        if parallel_workers > 1 && ~has_parallel
+            fprintf('Parallel Computing Toolbox is not available. Falling back to serial execution.\n');
+        end
+        for subject_index = 1:numel(subject_ids)
+            process_subject_spm(root_dir, output_root, subject_ids{subject_index}, task_names, n_discard, smooth_fwhm, normalize_vox, normalize_bb, overwrite_existing);
         end
     end
 
-    fprintf('\nAll requested ds002336 preprocessing jobs finished.\n');
+    fprintf('\nAll requested preprocessing jobs finished.\n');
     fprintf('Outputs are under: %s\n', output_root);
 end
 
@@ -272,7 +233,7 @@ function task_names = resolve_subject_tasks(root_dir, subject_id, requested_task
     d = dir(fullfile(func_dir, sprintf('%s_task-*_bold.json', subject_id)));
     detected = {};
     for i = 1:numel(d)
-        token = regexp(d(i).name, '_task-[^_]+', 'match', 'once');
+        token = regexp(d(i).name, '_task-[^_]+(?:_run-[^_]+)?', 'match', 'once');
         if ~isempty(token)
             detected{end+1} = token(2:end); %#ok<AGROW>
         end
@@ -281,7 +242,17 @@ function task_names = resolve_subject_tasks(root_dir, subject_id, requested_task
     if isempty(requested_tasks)
         task_names = detected;
     else
-        task_names = intersect(detected, requested_tasks, 'stable');
+        task_names = {};
+        for i = 1:numel(detected)
+            candidate = detected{i};
+            for j = 1:numel(requested_tasks)
+                requested = requested_tasks{j};
+                if strcmp(candidate, requested) || startsWith(candidate, [requested '_run-'])
+                    task_names{end+1} = candidate; %#ok<AGROW>
+                    break;
+                end
+            end
+        end
     end
 end
 
@@ -441,5 +412,76 @@ function ok = is_valid_nifti(nifti_path)
         ok = ~isempty(V);
     catch
         ok = false;
+    end
+end
+
+
+function process_subject_spm(root_dir, output_root, subject_id, task_names, n_discard, smooth_fwhm, normalize_vox, normalize_bb, overwrite_existing)
+    subject_tasks = resolve_subject_tasks(root_dir, subject_id, task_names);
+    if isempty(subject_tasks)
+        fprintf('No matching tasks found for %s. Skipping.\n', subject_id);
+        return;
+    end
+
+    anat_dir = fullfile(root_dir, subject_id, 'anat');
+    anat_file = find_one_file(anat_dir, sprintf('%s*_T1w.nii', subject_id), sprintf('%s*_T1w.nii.gz', subject_id));
+
+    for task_index = 1:numel(subject_tasks)
+        task_name = subject_tasks{task_index};
+        fprintf('\n[%d/%d] %s %s\n', task_index, numel(subject_tasks), subject_id, task_name);
+
+        func_dir = fullfile(root_dir, subject_id, 'func');
+        func_file = find_one_file(func_dir, sprintf('%s_%s*_bold.nii', subject_id, task_name), sprintf('%s_%s*_bold.nii.gz', subject_id, task_name));
+        func_json = find_one_file(func_dir, sprintf('%s_%s*_bold.json', subject_id, task_name), '');
+
+        meta = read_json_file(func_json);
+        TR = get_required_scalar(meta, 'RepetitionTime');
+        slice_timing = get_required_vector(meta, 'SliceTiming');
+        num_slices = numel(slice_timing);
+        acquisition_time = max(slice_timing) - min(slice_timing);
+        nominal_ref_timing = median(slice_timing);
+        [~, ref_slice_index] = min(abs(slice_timing - nominal_ref_timing));
+        ref_slice_timing = slice_timing(ref_slice_index);
+
+        subject_out_dir = fullfile(output_root, subject_id);
+        task_work_dir = fullfile(subject_out_dir, ['_tmp_' task_name]);
+        if ~exist(subject_out_dir, 'dir')
+            mkdir(subject_out_dir);
+        end
+        if ~exist(task_work_dir, 'dir')
+            mkdir(task_work_dir);
+        end
+
+        staged_func = stage_nifti(func_file, task_work_dir, overwrite_existing);
+        staged_anat = stage_nifti(anat_file, task_work_dir, overwrite_existing);
+        trimmed_func = discard_initial_volumes(staged_func, n_discard, overwrite_existing);
+
+        scans = build_scan_list(trimmed_func);
+        a_scans = add_prefix_to_scans(scans, 'a');
+        ra_scans = add_prefix_to_scans(a_scans, 'r');
+        wa_ra_scans = add_prefix_to_scans(ra_scans, 'w');
+        mean_epi = mean_image_path(trimmed_func, 'a');
+
+        [~, anat_name, anat_ext] = fileparts(staged_anat);
+        deformation_field = fullfile(task_work_dir, ['y_' anat_name anat_ext]);
+
+        fprintf('  Functional: %s\n', staged_func);
+        fprintf('  Anatomical: %s\n', staged_anat);
+        fprintf('  JSON TR: %.4f s\n', TR);
+        fprintf('  JSON slices: %d\n', num_slices);
+        fprintf('  JSON SliceTiming: %s\n', mat2str(slice_timing));
+        fprintf('  JSON TA: %.4f s\n', acquisition_time);
+        fprintf('  Reference slice index: %d\n', ref_slice_index);
+        fprintf('  Reference slice timing: %.4f s\n', ref_slice_timing);
+
+        run_stage_one_batch(scans, a_scans, mean_epi, staged_anat, TR, acquisition_time, num_slices, slice_timing, ref_slice_timing, task_work_dir, subject_id, task_name);
+
+        if ~isfile(deformation_field)
+            error('SPM segmentation did not produce deformation field: %s', deformation_field);
+        end
+
+        run_stage_two_batch(deformation_field, staged_anat, ra_scans, wa_ra_scans, smooth_fwhm, normalize_vox, normalize_bb, task_work_dir, subject_id, task_name);
+        final_fmri = finalize_task_outputs(subject_out_dir, task_work_dir, subject_id, task_name, overwrite_existing);
+        fprintf('  Final model-ready fMRI: %s\n', final_fmri);
     end
 end

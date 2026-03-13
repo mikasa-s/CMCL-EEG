@@ -3,6 +3,7 @@ from __future__ import annotations
 """基于 manifest 的 EEG-fMRI 配对数据集。"""
 
 from bisect import bisect_right
+from pathlib import Path
 from typing import Any
 import pandas as pd
 from torch.utils.data import Dataset
@@ -58,6 +59,21 @@ class PairedEEGfMRIDataset(Dataset):
             return value.decode("utf-8", errors="replace")
         return str(value)
 
+    @staticmethod
+    def _resolve_auto_eeg_channel_indices(root_dir: str) -> list[int] | None:
+        if not root_dir:
+            return None
+        mapping_path = Path(root_dir) / "eeg_channel_mapping.csv"
+        if not mapping_path.exists():
+            return None
+        mapping_df = pd.read_csv(mapping_path)
+        required = {"target_channel_index", "source_channel_index"}
+        if not required.issubset(set(mapping_df.columns)):
+            return None
+        ordered = mapping_df.sort_values(by="target_channel_index", kind="stable")
+        indices = ordered["source_channel_index"].dropna().astype(int).tolist()
+        return indices or None
+
     def __init__(
         self,
         manifest_csv: str,
@@ -76,9 +92,13 @@ class PairedEEGfMRIDataset(Dataset):
         require_fmri: bool = True,
         subject_pack_cache_size: int = 5,
         preload_dataset: bool | str = "auto",
+        eeg_channel_subset: str = "none",
     ) -> None:
         self.df = pd.read_csv(manifest_csv)
         self.training_ready = self._manifest_is_training_ready(self.df)
+        resolved_channel_indices: list[int] | None = None
+        if str(eeg_channel_subset).strip().lower() == "auto":
+            resolved_channel_indices = self._resolve_auto_eeg_channel_indices(root_dir)
         self.preparer = PairedSamplePreparer(
             root_dir=root_dir,
             normalize_eeg=False if self.training_ready else normalize_eeg,
@@ -94,6 +114,7 @@ class PairedEEGfMRIDataset(Dataset):
             require_eeg=require_eeg,
             require_fmri=require_fmri,
             subject_pack_cache_size=subject_pack_cache_size,
+            eeg_channel_indices=resolved_channel_indices,
         )
         self.subject_packed = "subject_path" in self.df.columns
         self.preload_dataset = self._resolve_preload_dataset(preload_dataset, subject_packed=self.subject_packed)

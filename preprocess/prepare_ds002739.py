@@ -190,6 +190,7 @@ def parse_args() -> argparse.Namespace:
     )
     add_training_ready_arg(parser)
     parser.add_argument("--num-workers", type=int, default=1, help="Number of subject-level worker processes. Use 1 to keep processing serial.")
+    parser.add_argument("--eeg-only", action="store_true", help="Export EEG-only finetune cache. fMRI arrays are not saved and are not required by downstream loaders.")
     return parser.parse_args()
 
 
@@ -458,15 +459,17 @@ def build_sample_record(
     run: str,
     trial_type: str,
     eeg_rel_path: Path,
-    fmri_rel_path: Path,
+    fmri_rel_path: Path | None,
     label: int,
     label_name: str,
     eeg: np.ndarray,
-    fmri: np.ndarray,
+    fmri: np.ndarray | None,
     window_sec: float,
     trial_index: int,
     training_ready: bool,
 ) -> SampleRecord:
+    fmri_path_value = fmri_rel_path.as_posix() if fmri_rel_path is not None else ""
+    fmri_shape_value = "x".join(str(dim) for dim in fmri.shape) if fmri is not None else ""
     return SampleRecord(
         sample_id=sample_id,
         dataset=dataset,
@@ -477,11 +480,11 @@ def build_sample_record(
         run=run,
         trial_type=trial_type,
         eeg_path=eeg_rel_path.as_posix(),
-        fmri_path=fmri_rel_path.as_posix(),
+        fmri_path=fmri_path_value,
         label=label,
         label_name=label_name,
         eeg_shape="x".join(str(dim) for dim in eeg.shape),
-        fmri_shape="x".join(str(dim) for dim in fmri.shape),
+        fmri_shape=fmri_shape_value,
         window_sec=float(window_sec),
         trial_index=int(trial_index),
         training_ready=bool(training_ready),
@@ -539,7 +542,11 @@ def prepare_subject(
         if fmri_events.empty:
             continue
 
-        if args.fmri_mode == "roi":
+        if args.eeg_only:
+            bold_shape = (0, 0, 0, 0)
+            voxel_size = (0.0, 0.0, 0.0, float(args.tr))
+            fmri_source = None
+        elif args.fmri_mode == "roi":
             fmri_source, bold_shape, voxel_size = extract_roi_timeseries(
                 fmri_nii_path=bold_path,
                 labels_img=labels_img,
@@ -574,7 +581,7 @@ def prepare_subject(
                 bold_shape="x".join(str(dim) for dim in bold_shape),
                 voxel_size="x".join(str(dim) for dim in voxel_size),
                 target_voxel_size="x".join(str(float(dim)) for dim in args.fmri_voxel_size),
-                exported_fmri_shape="x".join(str(dim) for dim in fmri_source.shape),
+                exported_fmri_shape="" if fmri_source is None else "x".join(str(dim) for dim in fmri_source.shape),
                 eeg_shape="x".join(str(dim) for dim in eeg_data.shape),
                 eeg_fmri_offset_sec=eeg_fmri_offset_sec,
                 event_counts=str(event_counts),
@@ -623,7 +630,9 @@ def prepare_subject(
                     eeg_window = maybe_patch_eeg(eeg_window, seq_len=eeg_seq_len, patch_len=eeg_patch_len)
                 eeg_window = prepare_training_ready_eeg(eeg_window, enabled=bool(args.training_ready))
 
-                if args.fmri_mode == "roi":
+                if args.eeg_only:
+                    fmri_window = None
+                elif args.fmri_mode == "roi":
                     fmri_window = slice_fmri_window(
                         fmri_source,
                         tr=args.tr,
@@ -637,7 +646,8 @@ def prepare_subject(
                         start_sec=fmri_onset_sec,
                         duration_sec=fmri_window_length_sec,
                     )
-                fmri_window = prepare_training_ready_fmri(fmri_window, fmri_mode=args.fmri_mode, enabled=bool(args.training_ready))
+                if fmri_window is not None:
+                    fmri_window = prepare_training_ready_fmri(fmri_window, fmri_mode=args.fmri_mode, enabled=bool(args.training_ready))
             except ValueError:
                 continue
 
@@ -645,16 +655,19 @@ def prepare_subject(
 
             if args.pack_subject_files:
                 packed_eeg_samples.append(eeg_window.astype(np.float32))
-                packed_fmri_samples.append(fmri_window.astype(np.float32))
+                if fmri_window is not None:
+                    packed_fmri_samples.append(fmri_window.astype(np.float32))
                 packed_labels.append(label)
                 packed_trial_indices.append(int(trial_row["trial_index"]))
                 packed_runs.append(run)
                 packed_sample_ids.append(sample_id)
             else:
                 eeg_out_path = eeg_out_dir / f"{sample_id}.npy"
-                fmri_out_path = fmri_out_dir / f"{sample_id}.npy"
                 np.save(eeg_out_path, eeg_window.astype(np.float32))
-                np.save(fmri_out_path, fmri_window)
+                fmri_out_path: Path | None = None
+                if fmri_window is not None:
+                    fmri_out_path = fmri_out_dir / f"{sample_id}.npy"
+                    np.save(fmri_out_path, fmri_window)
 
                 records.append(
                     build_sample_record(
@@ -666,7 +679,7 @@ def prepare_subject(
                         run=run,
                         trial_type=trial_type,
                         eeg_rel_path=eeg_out_path.relative_to(out_root),
-                        fmri_rel_path=fmri_out_path.relative_to(out_root),
+                        fmri_rel_path=None if fmri_out_path is None else fmri_out_path.relative_to(out_root),
                         label=label,
                         label_name=label_name,
                         eeg=eeg_window,
@@ -680,22 +693,25 @@ def prepare_subject(
     subject_record: SubjectRecord | None = None
     if args.pack_subject_files and packed_eeg_samples:
         packed_eeg = stack_subject_samples(packed_eeg_samples, name="EEG")
-        packed_fmri = stack_subject_samples(packed_fmri_samples, name="fMRI")
         packed_labels_array = np.asarray(packed_labels, dtype=np.int64)
         packed_trial_indices_array = np.asarray(packed_trial_indices, dtype=np.int64)
         packed_runs_array = np.asarray(packed_runs)
         packed_sample_ids_array = np.asarray(packed_sample_ids)
 
+        arrays_to_write = {
+            "eeg": packed_eeg,
+            "labels": packed_labels_array,
+            "trial_index": packed_trial_indices_array,
+            "run": packed_runs_array,
+            "sample_id": packed_sample_ids_array,
+        }
+        if packed_fmri_samples:
+            packed_fmri = stack_subject_samples(packed_fmri_samples, name="fMRI")
+            arrays_to_write["fmri"] = packed_fmri
+
         subject_path = write_subject_memmap_pack(
             packed_out_dir / subject_uid,
-            {
-                "eeg": packed_eeg,
-                "fmri": packed_fmri,
-                "labels": packed_labels_array,
-                "trial_index": packed_trial_indices_array,
-                "run": packed_runs_array,
-                "sample_id": packed_sample_ids_array,
-            },
+            arrays_to_write,
         )
         subject_record = SubjectRecord(
             dataset="ds002739",
@@ -705,7 +721,7 @@ def prepare_subject(
             subject_path=subject_path.relative_to(out_root).as_posix(),
             sample_count=int(packed_labels_array.shape[0]),
             eeg_shape="x".join(str(dim) for dim in packed_eeg.shape),
-            fmri_shape="x".join(str(dim) for dim in packed_fmri.shape),
+            fmri_shape="" if not packed_fmri_samples else "x".join(str(dim) for dim in packed_fmri.shape),
             label_shape="x".join(str(dim) for dim in packed_labels_array.shape),
             training_ready=bool(args.training_ready),
         )
@@ -743,7 +759,8 @@ def main() -> None:
         packed_out_dir.mkdir(parents=True, exist_ok=True)
     else:
         eeg_out_dir.mkdir(parents=True, exist_ok=True)
-        fmri_out_dir.mkdir(parents=True, exist_ok=True)
+        if not args.eeg_only:
+            fmri_out_dir.mkdir(parents=True, exist_ok=True)
 
     labels_img = get_atlas_labels_img(args.atlas_labels_img, atlas_cache_dir, args.n_rois) if args.fmri_mode == "roi" else ""
     subjects = find_subjects(ds_root, args.subjects)

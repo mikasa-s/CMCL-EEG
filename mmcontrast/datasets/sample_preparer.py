@@ -30,6 +30,7 @@ class PairedSamplePreparer:
         require_eeg: bool = True,
         require_fmri: bool = True,
         subject_pack_cache_size: int = 5,
+        eeg_channel_indices: list[int] | tuple[int, ...] | None = None,
     ) -> None:
         self.root_dir = Path(root_dir) if root_dir else None
         self.normalize_eeg = bool(normalize_eeg)
@@ -45,7 +46,19 @@ class PairedSamplePreparer:
         self.require_eeg = bool(require_eeg)
         self.require_fmri = bool(require_fmri)
         self.subject_pack_cache_size = max(0, int(subject_pack_cache_size))
+        self.eeg_channel_indices = tuple(int(index) for index in eeg_channel_indices) if eeg_channel_indices else None
         self._subject_pack_cache: OrderedDict[str, dict[str, np.ndarray]] = OrderedDict()
+
+    def select_eeg_channels(self, eeg: np.ndarray, source: Path) -> np.ndarray:
+        if self.eeg_channel_indices is None:
+            return eeg
+        if eeg.ndim < 2:
+            raise ValueError(f"EEG sample must have channel axis, got {eeg.shape} from {source}")
+        channel_count = int(eeg.shape[1])
+        invalid = [index for index in self.eeg_channel_indices if index < 0 or index >= channel_count]
+        if invalid:
+            raise ValueError(f"EEG channel subset indices out of range for {source}: {invalid} with channel_count={channel_count}")
+        return np.asarray(eeg[:, self.eeg_channel_indices, ...], dtype=np.float32)
 
     def resolve_path(self, path_value: str) -> Path:
         path = Path(path_value)
@@ -140,6 +153,7 @@ class PairedSamplePreparer:
         output = np.array(eeg, dtype=np.float32, copy=True) * self.eeg_scale
         if output.ndim != 4:
             raise ValueError(f"EEG batch must be 4D [N,C,S,P], got {output.shape} from {source}")
+        output = self.select_eeg_channels(output, source)
         if self.normalize_eeg:
             output = self.zscore_batch(output)
         return torch.from_numpy(output)
