@@ -57,6 +57,7 @@ def normalize_study_config(raw: dict[str, Any], args: argparse.Namespace, config
     study_cfg = dict(raw.get("study", {}))
     metric_cfg = dict(raw.get("metric", {}))
     parameters_cfg = dict(raw.get("parameters", {}))
+    parameter_groups_cfg = dict(raw.get("parameter_groups", {}))
     modes_cfg = dict(raw.get("modes", {}))
     runtime_cfg = dict(raw.get("runtime_configs", {}))
     if not study_cfg or not metric_cfg or not parameters_cfg:
@@ -82,6 +83,11 @@ def normalize_study_config(raw: dict[str, Any], args: argparse.Namespace, config
             "transform": str(metric_cfg.get("transform", "none")).strip().lower(),
         },
         "parameters": parameters_cfg,
+        "parameter_groups": {
+            str(name): [str(item) for item in value]
+            for name, value in parameter_groups_cfg.items()
+            if isinstance(value, list)
+        },
         "runtime_configs": {
             "train_base": resolve_path(str(runtime_cfg.get("train_base", "")), base_dir=PROJECT_ROOT) if str(runtime_cfg.get("train_base", "")).strip() else None,
             "finetune_base": resolve_path(str(runtime_cfg.get("finetune_base", "")), base_dir=PROJECT_ROOT) if str(runtime_cfg.get("finetune_base", "")).strip() else None,
@@ -103,9 +109,54 @@ def normalize_study_config(raw: dict[str, Any], args: argparse.Namespace, config
             merged_metric = dict(normalized["metric"])
             merged_metric.update(dict(mode_cfg["metric"]))
             normalized["metric"] = merged_metric
+        selected_names: list[str] = []
+        parameter_group_names = mode_cfg.get("parameter_groups")
+        if parameter_group_names:
+            for group_name in parameter_group_names:
+                group_key = str(group_name)
+                if group_key not in normalized["parameter_groups"]:
+                    raise ValueError(f"Unknown parameter group '{group_key}' in mode '{mode_name}'")
+                selected_names.extend(normalized["parameter_groups"][group_key])
         parameter_names = mode_cfg.get("parameter_names")
         if parameter_names:
-            normalized["parameters"] = {name: normalized["parameters"][name] for name in parameter_names}
+            selected_names.extend([str(name) for name in parameter_names])
+        if selected_names:
+            deduped = list(dict.fromkeys(selected_names))
+            missing = [name for name in deduped if name not in normalized["parameters"]]
+            if missing:
+                raise ValueError(f"Unknown parameter names in mode '{mode_name}': {missing}")
+            normalized["parameters"] = {name: normalized["parameters"][name] for name in deduped}
+
+    static_args_set = set(normalized["static_args"])
+    active_train = "-SkipPretrain" not in static_args_set
+    active_finetune = "-SkipFinetune" not in static_args_set
+    if not active_train and not active_finetune:
+        raise ValueError("Invalid static args: both pretrain and finetune are skipped")
+    normalized["active_stages"] = {
+        "train": active_train,
+        "finetune": active_finetune,
+    }
+
+    filtered_parameters: dict[str, Any] = {}
+    for name, spec in normalized["parameters"].items():
+        target = str(spec.get("target", "config")).strip().lower()
+        if target != "config":
+            filtered_parameters[name] = spec
+            continue
+
+        updates = spec.get("config_updates", [])
+        applies_to_active_stage = False
+        for update in updates:
+            config_name = str(update.get("config", "")).strip()
+            if config_name == "train" and active_train:
+                applies_to_active_stage = True
+                break
+            if config_name == "finetune" and active_finetune:
+                applies_to_active_stage = True
+                break
+        if applies_to_active_stage:
+            filtered_parameters[name] = spec
+    normalized["parameters"] = filtered_parameters
 
     if not normalized["command"]:
         raise ValueError("study.command must be a non-empty string list")
@@ -206,6 +257,7 @@ def main() -> None:
                 key: (str(value) if value is not None else None)
                 for key, value in study_cfg["runtime_configs"].items()
             },
+            "active_stages": study_cfg.get("active_stages", {}),
             "parameter_names": sorted(study_cfg["parameters"].keys()),
         }
         print(json.dumps(summary, ensure_ascii=False, indent=2))
@@ -232,9 +284,10 @@ def main() -> None:
 
         config_payloads: dict[str, dict[str, Any]] = {}
         runtime_cfg = study_cfg["runtime_configs"]
-        if runtime_cfg.get("train_base") is not None:
+        active_stages = study_cfg.get("active_stages", {})
+        if active_stages.get("train", True) and runtime_cfg.get("train_base") is not None:
             config_payloads["train"] = load_yaml(Path(runtime_cfg["train_base"]))
-        if runtime_cfg.get("finetune_base") is not None:
+        if active_stages.get("finetune", True) and runtime_cfg.get("finetune_base") is not None:
             config_payloads["finetune"] = load_yaml(Path(runtime_cfg["finetune_base"]))
         apply_config_updates(config_payloads, sampled_values, study_cfg["parameters"])
 

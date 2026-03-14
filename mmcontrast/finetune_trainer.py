@@ -130,7 +130,7 @@ class FinetuneTrainer:
         self.early_stop_min_delta = float(finetune_cfg.get("early_stop_min_delta", 0.0))
         self.use_amp = bool(finetune_cfg.get("use_amp", True))
         self.amp_dtype = str(finetune_cfg.get("amp_dtype", "fp16"))
-        self.scaler = torch.cuda.amp.GradScaler(enabled=self.use_amp and self.amp_dtype == "fp16")
+        self.scaler = torch.amp.GradScaler("cuda", enabled=self.use_amp and self.amp_dtype == "fp16")
 
         self.output_dir = self.resolve_path(str(finetune_cfg.get("output_dir", "outputs/finetune")))
         self.ckpt_dir = self.output_dir / "checkpoints"

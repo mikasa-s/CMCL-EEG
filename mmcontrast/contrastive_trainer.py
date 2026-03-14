@@ -94,7 +94,7 @@ class ContrastiveTrainer:
         self.grad_clip = float(train_cfg.get("grad_clip", 0.0))
         self.use_amp = bool(train_cfg.get("use_amp", True))
         self.amp_dtype = str(train_cfg.get("amp_dtype", "fp16"))
-        self.scaler = torch.cuda.amp.GradScaler(enabled=self.use_amp and self.amp_dtype == "fp16")
+        self.scaler = torch.amp.GradScaler("cuda", enabled=self.use_amp and self.amp_dtype == "fp16")
         self.log_interval = int(train_cfg.get("log_interval", 20))
 
         self.output_dir = self.resolve_path(str(train_cfg.get("output_dir", "outputs/run1")))

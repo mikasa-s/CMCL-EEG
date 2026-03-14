@@ -1,9 +1,9 @@
 study:
-  name: optuna_loso_ds002338
+  name: optuna_ds002338
   default_mode: full
   direction: maximize
   n_trials: 20
-  output_dir: outputs/optuna/loso_ds002338
+  output_dir: outputs/optuna/ds002338
   command:
     - powershell
     - -ExecutionPolicy
@@ -119,30 +119,34 @@ parameters:
       - config: finetune
         key: finetune.early_stop_patience
 
+parameter_groups:
+  pretrain: [train_epochs, batch_size, lr, weight_decay, min_lr, grad_clip]
+  finetune: [train_epochs, batch_size, lr, weight_decay, min_lr, hidden_dim, grad_clip, early_stop_patience]
+
 modes:
   full:
-    study_name: optuna_loso_ds002338_full
-    output_dir: outputs/optuna/loso_ds002338_full
-    parameter_names: [train_epochs, batch_size, lr, weight_decay, min_lr, hidden_dim, grad_clip, early_stop_patience]
+    study_name: optuna_ds002338_full
+    output_dir: outputs/optuna/ds002338_full
+    parameter_groups: [pretrain, finetune]
 
   finetune_only:
-    study_name: optuna_loso_ds002338_finetune_only
-    output_dir: outputs/optuna/loso_ds002338_finetune_only
+    study_name: optuna_ds002338_finetune_only
+    output_dir: outputs/optuna/ds002338_finetune_only
     static_args: [-SkipPretrain]
     metric:
       path: finetune/loso_finetune_summary.csv
       column: accuracy
       row_filter:
         fold: CROSS_FOLD_MEAN_STD
-    parameter_names: [lr, min_lr, hidden_dim, early_stop_patience]
+    parameter_groups: [finetune]
 
   pretrain_only:
-    study_name: optuna_loso_ds002338_pretrain_only
-    output_dir: outputs/optuna/loso_ds002338_pretrain_only
+    study_name: optuna_ds002338_pretrain_only
+    output_dir: outputs/optuna/ds002338_pretrain_only
     static_args: [-SkipFinetune]
     metric:
       type: json
       path: contrastive/final_metrics.json
       key: best_score
       transform: negate
-    parameter_names: [train_epochs, batch_size, lr, weight_decay, min_lr, grad_clip]
+    parameter_groups: [pretrain]
