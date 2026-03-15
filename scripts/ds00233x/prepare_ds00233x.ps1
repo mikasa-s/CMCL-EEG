@@ -12,9 +12,11 @@ param(
     [int]$TestSubjects = 1,
     [int]$EegSeqLen = 8,
     [int]$EegPatchLen = 200,
+    [double]$BlockWindowSec = 8.0,
+    [double]$BlockOverlapSec = 2.0,
     [bool]$DropEcg = $true,
-    [bool]$TrainingReady = $true,
-    [bool]$EegOnly = $true,
+    [switch]$TrainingReady,
+    [switch]$EegOnly,
     [string]$TargetChannelManifest = "",
     [ValidateSet("raw", "spm_unsmoothed", "spm_smoothed")]
     [string]$FmriSource = "spm_smoothed",
@@ -23,6 +25,27 @@ param(
 
 $ErrorActionPreference = "Stop"
 Set-Location (Resolve-Path (Join-Path $PSScriptRoot "..\.."))
+
+if (-not $PSBoundParameters.ContainsKey("TrainingReady")) {
+    $TrainingReady = $true
+}
+if (-not $PSBoundParameters.ContainsKey("EegOnly")) {
+    $EegOnly = $true
+}
+
+if (-not (Test-Path $DsRoot)) {
+    $candidateRoots = @(
+        (Join-Path (Get-Location) ("data/" + $DatasetName)),
+        (Join-Path (Get-Location) ("../data/" + $DatasetName)),
+        (Join-Path (Get-Location) ("../" + $DatasetName))
+    )
+    foreach ($candidate in $candidateRoots) {
+        if (Test-Path $candidate) {
+            $DsRoot = $candidate
+            break
+        }
+    }
+}
 
 $python = if ($PythonExe.Trim()) { $PythonExe } else { "python" }
 
@@ -66,6 +89,8 @@ $cliArgs = @(
     "--eeg-mode", "patched",
     "--eeg-seq-len", $EegSeqLen.ToString(),
     "--eeg-patch-len", $EegPatchLen.ToString(),
+    "--block-window-sec", $BlockWindowSec.ToString(),
+    "--block-overlap-sec", $BlockOverlapSec.ToString(),
     "--tr", "2.0",
     "--fmri-max-shape", "48", "48", "48",
     "--split-mode", $SplitMode,
@@ -120,3 +145,6 @@ Write-Host ("fMRI source: " + $FmriSource)
 Write-Host ("EEG-only: " + $EegOnly)
 
 & $python @cliArgs
+if ($LASTEXITCODE -ne 0) {
+    throw "ds00233x preprocessing failed with exit code $LASTEXITCODE"
+}

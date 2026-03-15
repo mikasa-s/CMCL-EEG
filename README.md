@@ -216,10 +216,13 @@ python -m pip install -r requirements.txt
 - Ds002739FinetuneConfig：ds002739 微调配置。
 - JointCacheRoot：联合预训练缓存目录，默认 cache/joint_contrastive。
 - JointOutputRoot：联合预训练输出目录，默认 outputs/joint_contrastive。
+- PretrainedWeightsDir：联合预训练 best checkpoint 统一存放目录，默认 pretrained_weights。
 - JointEegWindowSec：联合预训练的 EEG 连续上下文窗口长度，默认 8 秒。
 - PretrainEpochs：覆盖 contrastive epoch。
 - FinetuneEpochs：覆盖 finetune epoch。
-- BatchSize：覆盖训练 batch size。
+- PretrainBatchSize：仅覆盖预训练 batch size。
+- FinetuneBatchSize：仅覆盖微调训练 batch size。
+- BatchSize：兼容旧参数，会同时覆盖 PretrainBatchSize 和 FinetuneBatchSize。
 - EvalBatchSize：覆盖微调评估 batch size。
 - NumWorkers：覆盖 DataLoader worker 数。
 - NumWorkers：也会传递给联合预处理脚本，用于 ds002336 / ds002338 并行处理。
@@ -227,6 +230,13 @@ python -m pip install -r requirements.txt
 - SkipFinetune：跳过微调，只做联合预训练。
 - TestOnly：只加载已有微调 checkpoint 做测试。
 - ForceCpu：强制 CPU。
+
+脚本会在微调前打印预训练 best checkpoint 来源，默认路径为 `pretrained_weights/contrastive_best.pth`（由 `JointOutputRoot/contrastive/checkpoints/best.pth` 同步而来）。如果路径不存在，会显式提示当前微调将不加载对比学习权重。
+
+计时日志已统一为 fold/stage 级：
+
+- 预训练阶段在 `contrastive/final_metrics.json` 记录 `fold_elapsed_seconds`。
+- 微调阶段在每个 fold 结束打印 `fold_elapsed=...s`，并在每折 `final_metrics.json` 记录 `fold_elapsed_seconds`。
 
 ### 示例 1：只用 ds002336 预训练，并在 ds002336 上微调
 
@@ -345,6 +355,23 @@ ds002739：
 
 这些配置仍然保留 LOSO 微调所需的 train、val、test manifest 结构。
 
+### EEG Baseline 权重策略
+
+`finetune.eeg_baseline` 现已支持以下策略：
+
+- `category=traditional`：始终随机初始化，不加载预训练权重。
+- `category=foundation`：通过 `load_pretrained_weights` 控制是否加载权重。
+  - `true`：按模型类型加载（例如 cbramod 从 `finetune.contrastive_checkpoint_path` 提取 EEG encoder）。
+  - `false`：强制随机初始化。
+
+新增 LaBraM baseline 选项：
+
+- `model_name: labram`
+- `labram_model_name: labram_base_patch200_200`（可改 large/huge）
+- `labram_checkpoint_path: pretrained_weights/labram-base.pth`
+
+注意：当前 LaBraM baseline 需要输入 EEG 通道数为 62。
+
 ## Optuna
 
 Optuna 现在仍然保留，但已经切换到当前的新主流程，不再依赖旧的单数据集 contrastive 运行脚本。
@@ -367,11 +394,26 @@ python .\run_optuna_search.py --study-config configs\optuna_ds002739.yaml --mode
 - [configs/optuna_ds002338.yaml](configs/optuna_ds002338.yaml)
 - [configs/optuna_ds002739.yaml](configs/optuna_ds002739.yaml)
 
-这两个配置已经适配当前工作流：
+Linux 请使用对应副本（避免 `powershell` 命令缺失）：
+
+- [configs/optuna_ds002336_linux.yaml](configs/optuna_ds002336_linux.yaml)
+- [configs/optuna_ds002338_linux.yaml](configs/optuna_ds002338_linux.yaml)
+- [configs/optuna_ds002739_linux.yaml](configs/optuna_ds002739_linux.yaml)
+
+这三个配置已经适配当前工作流：
 
 - full：联合预训练 + 单目标数据集微调。
 - finetune_only：跳过预训练，只做目标数据集微调。
 - pretrain_only：跳过微调，只做联合预训练。
+
+`pretrain_only` 下，真正参与搜索与执行的是：
+
+- `runtime_configs.train_base`（默认 `configs/train_joint_contrastive.yaml`）
+- mode 的 `parameter_groups` 里属于 `pretrain` 的参数
+- `study.static_args` 里的 `-PretrainDatasets`
+
+因此，不同 `optuna_ds*.yaml` 在 `pretrain_only` 模式下是否“结果一样”，取决于这三部分是否完全一致。
+如果三者一致，则搜索空间和目标一致，结果分布应接近；如果有任一项不同（例如 `-PretrainDatasets` 或参数范围不同），结果就会不同。
 
 并且现在支持 `parameter_groups`，用于按阶段组织搜索参数：
 
@@ -386,15 +428,17 @@ python .\run_optuna_search.py --study-config configs\optuna_ds002739.yaml --mode
 参数选择已经按你之前那套恢复进来了：
 
 - train_epochs
-- batch_size
-- lr
+- pretrain_batch_size
+- finetune_batch_size
+- pretrain_lr
+- finetune_lr
 - weight_decay
 - min_lr
 - hidden_dim
 - grad_clip
 - early_stop_patience
 
-其中 ds002336 和 ds002739 各自的候选值也保留了之前的区别，例如 batch_size、train_epochs 和 early_stop_patience 的搜索范围仍然沿用原来的两套配置。
+其中 ds002336 和 ds002739 各自的候选值也保留了之前的区别，例如 pretrain/finetune 的 batch size、train_epochs 和 early_stop_patience 的搜索范围仍然沿用原来的两套配置。
 
 ### parameter_names / parameter_groups 含义
 
@@ -428,6 +472,13 @@ python .\run_optuna_search.py --study-config configs\optuna_ds002336.yaml --mode
 ```powershell
 python .\run_optuna_search.py --study-config configs\optuna_ds002739.yaml --mode pretrain_only
 python .\run_optuna_search.py --study-config configs\optuna_ds002338.yaml --mode pretrain_only
+```
+
+Linux 示例：
+
+```bash
+python ./run_optuna_search.py --study-config configs/optuna_ds002338_linux.yaml --mode full
+python ./run_optuna_search.py --study-config configs/optuna_ds002338_linux.yaml --mode pretrain_only
 ```
 
 ### 多 GPU 联合预训练示例

@@ -20,6 +20,10 @@ param(
 
 $ErrorActionPreference = "Stop"
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
+
+if ($Datasets.Count -eq 1 -and $Datasets[0] -match ",") {
+    $Datasets = @($Datasets[0].Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+}
 if ($env:CONDA_PREFIX) {
     $python = Join-Path $env:CONDA_PREFIX "python.exe"
 }

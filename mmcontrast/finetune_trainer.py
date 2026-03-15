@@ -6,6 +6,7 @@ from contextlib import nullcontext
 import csv
 import json
 from pathlib import Path
+import time
 from typing import Any
 
 import torch
@@ -245,7 +246,7 @@ class FinetuneTrainer:
 
     def load_checkpoint(self, checkpoint_path: Path) -> None:
         """恢复最佳模型权重，用于最终测试集评估。"""
-        checkpoint = torch.load(checkpoint_path, map_location="cpu")
+        checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
         model_state = checkpoint["model"]
         if hasattr(self.model, "module"):
             self.model.module.load_state_dict(model_state, strict=False)
@@ -421,6 +422,7 @@ class FinetuneTrainer:
 
     def fit(self) -> None:
         """执行完整微调流程，使用验证集指标选择最佳模型，并只对最佳模型做测试。"""
+        fold_start_time = time.perf_counter()
         best = -1.0
         best_epoch = 0
         last_train_loss = float("nan")
@@ -476,6 +478,7 @@ class FinetuneTrainer:
                     )
                 break
 
+        fold_elapsed_seconds = time.perf_counter() - fold_start_time
         final_metrics = {
             "epochs": self.epochs,
             "completed_epochs": epoch,
@@ -486,6 +489,7 @@ class FinetuneTrainer:
             "early_stop_patience": self.early_stop_patience,
             "early_stop_min_delta": self.early_stop_min_delta,
             "early_stopped": early_stopped,
+            "fold_elapsed_seconds": fold_elapsed_seconds,
         }
         if last_val_metrics is not None:
             final_metrics["last_val_metrics"] = last_val_metrics
@@ -496,5 +500,7 @@ class FinetuneTrainer:
             if test_metrics is not None:
                 final_metrics["test_metrics"] = test_metrics
                 self.save_metrics("test_metrics.json", test_metrics)
+        if is_main_process():
+            print(f"Finetune fold summary: fold_elapsed={fold_elapsed_seconds:.1f}s", flush=True)
         self.save_metrics("final_metrics.json", final_metrics)
         cleanup_distributed()

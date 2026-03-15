@@ -206,6 +206,18 @@ def parse_args() -> argparse.Namespace:
         default=2.0,
         help="Seconds to subtract from task events TSV onsets to map them onto protocol time. Defaults to 2.0 for ds00233x.",
     )
+    parser.add_argument(
+        "--block-window-sec",
+        type=float,
+        default=8.0,
+        help="When sample-mode=block, split each block into fixed windows of this length in seconds. If a block is shorter, use the full block duration.",
+    )
+    parser.add_argument(
+        "--block-overlap-sec",
+        type=float,
+        default=2.0,
+        help="When sample-mode=block, adjacent block windows overlap by this many seconds.",
+    )
     add_fmri_roi_resample_args(parser)
     add_eeg_patch_args(
         parser,
@@ -504,6 +516,34 @@ def compute_shifted_window(
     )
 
 
+def build_block_subwindow_offsets(block_duration_sec: float, window_sec: float, overlap_sec: float) -> list[float]:
+    """Return subwindow offsets (seconds) within one block using sliding windows.
+
+    Examples with window=8 and overlap=2:
+    - duration 20 -> [0, 6, 12]
+    - duration 8  -> [0]
+    - duration 5  -> [0]
+    """
+    if block_duration_sec <= 0:
+        return []
+    if block_duration_sec <= window_sec:
+        return [0.0]
+
+    stride_sec = window_sec - overlap_sec
+    starts: list[float] = []
+    start_sec = 0.0
+    # Add regular stride windows.
+    while start_sec + window_sec <= block_duration_sec + 1e-8:
+        starts.append(float(start_sec))
+        start_sec += stride_sec
+
+    # Ensure the last window reaches the end of the block.
+    last_start = max(0.0, block_duration_sec - window_sec)
+    if not starts or abs(starts[-1] - last_start) > 1e-6:
+        starts.append(float(last_start))
+    return starts
+
+
 def block_fits_eeg(data: np.ndarray, sfreq: float, start_sec: float, duration_sec: float) -> bool:
     start = int(round(start_sec * sfreq))
     length = int(round(duration_sec * sfreq))
@@ -581,6 +621,13 @@ def main() -> None:
         raise ValueError("binary_rest_task requires --sample-mode block because each run contains both rest and task blocks.")
     if args.fmri_mode == "volume" and args.fmri_target_rois is not None:
         raise ValueError("--fmri-target-rois is only valid when --fmri-mode=roi")
+    if args.sample_mode == "block":
+        if args.block_window_sec <= 0:
+            raise ValueError("--block-window-sec must be positive")
+        if args.block_overlap_sec < 0:
+            raise ValueError("--block-overlap-sec must be non-negative")
+        if args.block_overlap_sec >= args.block_window_sec:
+            raise ValueError("--block-overlap-sec must be smaller than --block-window-sec")
 
     ds_root = args.ds_root.resolve()
     out_root = args.output_root.resolve()
@@ -803,94 +850,102 @@ def main() -> None:
                     onset_sec = float(row["onset"]) - protocol_offset_sec
                     duration_sec = float(row["duration"])
                     trial_type = str(row["trial_type"]).strip()
-                    placement = compute_shifted_window(
-                        eeg_total_sec=eeg_total_sec,
-                        eeg_protocol_start_sec=eeg_protocol_start_sec,
-                        fmri_total_sec=fmri_total_sec,
-                        protocol_onset_sec=onset_sec,
-                        duration_sec=duration_sec,
+                    block_window_sec = min(float(args.block_window_sec), float(duration_sec))
+                    subwindow_offsets = build_block_subwindow_offsets(
+                        block_duration_sec=float(duration_sec),
+                        window_sec=float(block_window_sec),
+                        overlap_sec=float(args.block_overlap_sec),
                     )
-                    if placement is None:
-                        skipped_blocks.append(
-                            SkippedBlockRecord(
-                                subject=subject,
-                                task=task,
-                                block_index=int(block_idx),
-                                trial_type=trial_type,
-                                onset_sec=float(onset_sec),
-                                duration_sec=float(duration_sec),
-                                reason="paired_window_out_of_range",
+                    for sub_idx, sub_offset_sec in enumerate(subwindow_offsets):
+                        sub_onset_sec = onset_sec + float(sub_offset_sec)
+                        placement = compute_shifted_window(
+                            eeg_total_sec=eeg_total_sec,
+                            eeg_protocol_start_sec=eeg_protocol_start_sec,
+                            fmri_total_sec=fmri_total_sec,
+                            protocol_onset_sec=sub_onset_sec,
+                            duration_sec=float(block_window_sec),
+                        )
+                        if placement is None:
+                            skipped_blocks.append(
+                                SkippedBlockRecord(
+                                    subject=subject,
+                                    task=task,
+                                    block_index=int(block_idx),
+                                    trial_type=trial_type,
+                                    onset_sec=float(sub_onset_sec),
+                                    duration_sec=float(block_window_sec),
+                                    reason="paired_window_out_of_range",
+                                )
                             )
-                        )
-                        continue
-                    eeg_block = slice_eeg_block(eeg, sfreq=sfreq, start_sec=placement.eeg_start_sec, duration_sec=duration_sec)
-                    if args.eeg_mode == "patched":
-                        eeg_seq_len, eeg_patch_len = resolve_eeg_patch_params(
-                            sfreq=sfreq,
-                            requested_seq_len=args.eeg_seq_len,
-                            requested_patch_len=args.eeg_patch_len,
-                            sample_mode=args.sample_mode,
-                            duration_sec=duration_sec,
-                        )
-                        eeg_block = maybe_patch_eeg(eeg_block, seq_len=eeg_seq_len, patch_len=eeg_patch_len)
-                    eeg_block = prepare_training_ready_eeg(eeg_block, enabled=bool(args.training_ready))
+                            continue
+                        eeg_block = slice_eeg_block(eeg, sfreq=sfreq, start_sec=placement.eeg_start_sec, duration_sec=float(block_window_sec))
+                        if args.eeg_mode == "patched":
+                            eeg_seq_len, eeg_patch_len = resolve_eeg_patch_params(
+                                sfreq=sfreq,
+                                requested_seq_len=args.eeg_seq_len,
+                                requested_patch_len=args.eeg_patch_len,
+                                sample_mode=args.sample_mode,
+                                duration_sec=float(block_window_sec),
+                            )
+                            eeg_block = maybe_patch_eeg(eeg_block, seq_len=eeg_seq_len, patch_len=eeg_patch_len)
+                        eeg_block = prepare_training_ready_eeg(eeg_block, enabled=bool(args.training_ready))
 
-                    fmri_block: np.ndarray | None = None
-                    if fmri_full is not None:
-                        if args.fmri_mode == "roi":
-                            fmri_block = slice_fmri_block(fmri_full, tr=args.tr, start_sec=placement.fmri_start_sec, duration_sec=duration_sec)
-                            fmri_block = resample_fmri_if_needed(
-                                fmri_block,
-                                args.fmri_target_rois,
-                                args.fmri_target_t,
-                                allow_roi_resample=args.allow_fmri_roi_resample,
-                                allow_time_resample=args.allow_fmri_time_resample,
-                            )
+                        fmri_block: np.ndarray | None = None
+                        if fmri_full is not None:
+                            if args.fmri_mode == "roi":
+                                fmri_block = slice_fmri_block(fmri_full, tr=args.tr, start_sec=placement.fmri_start_sec, duration_sec=float(block_window_sec))
+                                fmri_block = resample_fmri_if_needed(
+                                    fmri_block,
+                                    args.fmri_target_rois,
+                                    args.fmri_target_t,
+                                    allow_roi_resample=args.allow_fmri_roi_resample,
+                                    allow_time_resample=args.allow_fmri_time_resample,
+                                )
+                            else:
+                                fmri_block = slice_fmri_volume_block(fmri_full, tr=args.tr, start_sec=placement.fmri_start_sec, duration_sec=float(block_window_sec))
+                            fmri_block = prepare_training_ready_fmri(fmri_block, fmri_mode=args.fmri_mode, enabled=bool(args.training_ready))
+
+                        if args.label_mode == "binary_rest_task":
+                            label, label_name = resolve_binary_label(trial_type)
                         else:
-                            fmri_block = slice_fmri_volume_block(fmri_full, tr=args.tr, start_sec=placement.fmri_start_sec, duration_sec=duration_sec)
-                        fmri_block = prepare_training_ready_fmri(fmri_block, fmri_mode=args.fmri_mode, enabled=bool(args.training_ready))
+                            label = TASK_LABELS[task]
+                            label_name = task
 
-                    if args.label_mode == "binary_rest_task":
-                        label, label_name = resolve_binary_label(trial_type)
-                    else:
-                        label = TASK_LABELS[task]
-                        label_name = task
+                        sample_id = f"{args.dataset_name}_{canonical_subject}_{task_name}_block-{block_idx:02d}_win-{sub_idx:02d}"
+                        if args.pack_subject_files:
+                            packed_eeg_samples.append(eeg_block.astype(np.float32))
+                            if fmri_block is not None:
+                                packed_fmri_samples.append(fmri_block.astype(np.float32))
+                            packed_labels.append(int(label))
+                            packed_sample_ids.append(sample_id)
+                            packed_tasks.append(task_name)
+                            packed_trial_types.append(trial_type)
+                        else:
+                            eeg_out_path = eeg_out_dir / f"{sample_id}.npy"
+                            np.save(eeg_out_path, eeg_block)
+                            fmri_out_path: Path | None = None
+                            if fmri_block is not None:
+                                fmri_out_path = fmri_out_dir / f"{sample_id}.npy"
+                                np.save(fmri_out_path, fmri_block)
 
-                    sample_id = f"{args.dataset_name}_{canonical_subject}_{task_name}_block-{block_idx:02d}"
-                    if args.pack_subject_files:
-                        packed_eeg_samples.append(eeg_block.astype(np.float32))
-                        if fmri_block is not None:
-                            packed_fmri_samples.append(fmri_block.astype(np.float32))
-                        packed_labels.append(int(label))
-                        packed_sample_ids.append(sample_id)
-                        packed_tasks.append(task_name)
-                        packed_trial_types.append(trial_type)
-                    else:
-                        eeg_out_path = eeg_out_dir / f"{sample_id}.npy"
-                        np.save(eeg_out_path, eeg_block)
-                        fmri_out_path: Path | None = None
-                        if fmri_block is not None:
-                            fmri_out_path = fmri_out_dir / f"{sample_id}.npy"
-                            np.save(fmri_out_path, fmri_block)
-
-                        records.append(
-                            build_sample_record(
-                                sample_id=sample_id,
-                                dataset=args.dataset_name,
-                                subject=canonical_subject,
-                                subject_uid=subject_uid,
-                                original_subject=subject,
-                                task=task_name,
-                                trial_type=trial_type,
-                                eeg_rel_path=eeg_out_path.relative_to(out_root),
-                                fmri_rel_path=None if fmri_out_path is None else fmri_out_path.relative_to(out_root),
-                                label=label,
-                                label_name=label_name,
-                                eeg=eeg_block,
-                                fmri=fmri_block,
-                                training_ready=bool(args.training_ready),
+                            records.append(
+                                build_sample_record(
+                                    sample_id=sample_id,
+                                    dataset=args.dataset_name,
+                                    subject=canonical_subject,
+                                    subject_uid=subject_uid,
+                                    original_subject=subject,
+                                    task=task_name,
+                                    trial_type=trial_type,
+                                    eeg_rel_path=eeg_out_path.relative_to(out_root),
+                                    fmri_rel_path=None if fmri_out_path is None else fmri_out_path.relative_to(out_root),
+                                    label=label,
+                                    label_name=label_name,
+                                    eeg=eeg_block,
+                                    fmri=fmri_block,
+                                    training_ready=bool(args.training_ready),
+                                )
                             )
-                        )
 
         if args.pack_subject_files and packed_eeg_samples:
             packed_eeg = stack_subject_samples(packed_eeg_samples, name="EEG")

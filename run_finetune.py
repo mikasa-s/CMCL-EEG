@@ -36,6 +36,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--lr", type=float, default=None)
     parser.add_argument("--eeg-baseline-category", type=str, default="")
     parser.add_argument("--eeg-baseline-model", type=str, default="")
+    parser.add_argument("--eeg-baseline-load-pretrained", type=str, default="")
+    parser.add_argument("--eeg-baseline-checkpoint", type=str, default="")
     parser.add_argument("--test-only", action="store_true")
     parser.add_argument("--force-cpu", action="store_true")
     parser.add_argument(
@@ -68,6 +70,14 @@ def assign_nested_value(payload: dict, dotted_key: str, value: object) -> None:
 
 
 def apply_overrides(config: dict, args: argparse.Namespace) -> dict:
+    def parse_bool_text(raw: str) -> bool:
+        token = raw.strip().lower()
+        if token in {"1", "true", "yes", "on"}:
+            return True
+        if token in {"0", "false", "no", "off"}:
+            return False
+        raise ValueError(f"Invalid boolean value: {raw}")
+
     mapping: list[tuple[str, object]] = [
         ("data.train_manifest_csv", args.train_manifest.strip()),
         ("data.val_manifest_csv", args.val_manifest.strip()),
@@ -94,6 +104,14 @@ def apply_overrides(config: dict, args: argparse.Namespace) -> dict:
         assign_nested_value(config, "finetune.eeg_baseline.category", args.eeg_baseline_category.strip())
     if args.eeg_baseline_model.strip():
         assign_nested_value(config, "finetune.eeg_baseline.model_name", args.eeg_baseline_model.strip())
+    if args.eeg_baseline_load_pretrained.strip():
+        assign_nested_value(
+            config,
+            "finetune.eeg_baseline.load_pretrained_weights",
+            parse_bool_text(args.eeg_baseline_load_pretrained),
+        )
+    if args.eeg_baseline_checkpoint.strip():
+        assign_nested_value(config, "finetune.eeg_baseline.labram_checkpoint_path", args.eeg_baseline_checkpoint.strip())
 
     if args.force_cpu:
         assign_nested_value(config, "train.force_cpu", True)

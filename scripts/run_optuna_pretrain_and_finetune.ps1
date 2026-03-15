@@ -1,21 +1,24 @@
 param(
-    [ValidateSet("ds002336", "ds002338", "ds002739")]
-    [string[]]$PretrainDatasets = @("ds002336", "ds002739"),
+    [string]$PretrainDatasets = "ds002336,ds002338,ds002739",
     [ValidateSet("ds002336", "ds002338", "ds002739")]
     [string]$TargetDataset = "ds002739",
     [string]$JointTrainConfig = "configs/train_joint_contrastive.yaml",
     [string]$FinetuneConfig = "configs/finetune_ds002739.yaml",
     [string]$OutputRoot = "outputs/optuna_run",
+    [string]$CacheRoot = "cache",
     [double]$JointEegWindowSec = 8.0,
     [int]$PretrainEpochs = 0,
     [int]$FinetuneEpochs = 0,
+    [int]$PretrainBatchSize = 0,
+    [int]$FinetuneBatchSize = 0,
     [int]$BatchSize = 0,
     [int]$EvalBatchSize = 0,
     [int]$NumWorkers = -1,
     [switch]$SkipPretrain,
     [switch]$SkipFinetune,
     [switch]$TestOnly,
-    [switch]$ForceCpu
+    [switch]$ForceCpu,
+    [string]$PythonExe = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -28,20 +31,27 @@ else {
     [System.IO.Path]::GetFullPath((Join-Path (Get-Location) $OutputRoot))
 }
 
-$jointCacheRoot = Join-Path $resolvedOutputRoot "cache\joint_contrastive"
-$ds002336CacheRoot = Join-Path $resolvedOutputRoot "cache\ds002336"
-$ds002338CacheRoot = Join-Path $resolvedOutputRoot "cache\ds002338"
-$ds002739CacheRoot = Join-Path $resolvedOutputRoot "cache\ds002739"
+$resolvedCacheRoot = if ([System.IO.Path]::IsPathRooted($CacheRoot)) {
+    [System.IO.Path]::GetFullPath($CacheRoot)
+}
+else {
+    [System.IO.Path]::GetFullPath((Join-Path (Get-Location) $CacheRoot))
+}
+
+$jointCacheRoot = Join-Path $resolvedCacheRoot "joint_contrastive"
+$ds002336CacheRoot = Join-Path $resolvedCacheRoot "ds002336"
+$ds002338CacheRoot = Join-Path $resolvedCacheRoot "ds002338"
+$ds002739CacheRoot = Join-Path $resolvedCacheRoot "ds002739"
 $sharedOutputRoot = $resolvedOutputRoot
 
-$args = @(
+$cliParams = @(
     "-ExecutionPolicy", "Bypass",
     "-File", "scripts/run_pretrain_and_finetune.ps1",
-    "-PretrainDatasets"
+    "-PretrainDatasets", $PretrainDatasets
 )
-$args += $PretrainDatasets
-$args += @(
+$cliParams += @(
     "-TargetDataset", $TargetDataset,
+    "-PythonExe", $PythonExe,
     "-JointTrainConfig", $JointTrainConfig,
     "-JointCacheRoot", $jointCacheRoot,
     "-Ds002336CacheRoot", $ds002336CacheRoot,
@@ -55,39 +65,48 @@ $args += @(
 )
 
 if ($TargetDataset -eq "ds002336") {
-    $args += @( "-Ds002336FinetuneConfig", $FinetuneConfig )
+    $cliParams += @( "-Ds002336FinetuneConfig", $FinetuneConfig )
+}
+elseif ($TargetDataset -eq "ds002338") {
+    $cliParams += @( "-Ds002338FinetuneConfig", $FinetuneConfig )
 }
 else {
-    $args += @( "-Ds002739FinetuneConfig", $FinetuneConfig )
+    $cliParams += @( "-Ds002739FinetuneConfig", $FinetuneConfig )
 }
 
 if ($PretrainEpochs -gt 0) {
-    $args += @( "-PretrainEpochs", $PretrainEpochs.ToString() )
+    $cliParams += @( "-PretrainEpochs", $PretrainEpochs.ToString() )
 }
 if ($FinetuneEpochs -gt 0) {
-    $args += @( "-FinetuneEpochs", $FinetuneEpochs.ToString() )
+    $cliParams += @( "-FinetuneEpochs", $FinetuneEpochs.ToString() )
 }
 if ($BatchSize -gt 0) {
-    $args += @( "-BatchSize", $BatchSize.ToString() )
+    $cliParams += @( "-BatchSize", $BatchSize.ToString() )
+}
+if ($PretrainBatchSize -gt 0) {
+    $cliParams += @( "-PretrainBatchSize", $PretrainBatchSize.ToString() )
+}
+if ($FinetuneBatchSize -gt 0) {
+    $cliParams += @( "-FinetuneBatchSize", $FinetuneBatchSize.ToString() )
 }
 if ($EvalBatchSize -gt 0) {
-    $args += @( "-EvalBatchSize", $EvalBatchSize.ToString() )
+    $cliParams += @( "-EvalBatchSize", $EvalBatchSize.ToString() )
 }
 if ($NumWorkers -ge 0) {
-    $args += @( "-NumWorkers", $NumWorkers.ToString() )
+    $cliParams += @( "-NumWorkers", $NumWorkers.ToString() )
 }
 if ($SkipPretrain) {
-    $args += "-SkipPretrain"
+    $cliParams += "-SkipPretrain"
 }
 if ($SkipFinetune) {
-    $args += "-SkipFinetune"
+    $cliParams += "-SkipFinetune"
 }
 if ($TestOnly) {
-    $args += "-TestOnly"
+    $cliParams += "-TestOnly"
 }
 if ($ForceCpu) {
-    $args += "-ForceCpu"
+    $cliParams += "-ForceCpu"
 }
 
-& powershell @args
+& powershell @cliParams
 exit $LASTEXITCODE

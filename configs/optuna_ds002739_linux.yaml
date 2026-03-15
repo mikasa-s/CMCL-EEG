@@ -5,23 +5,20 @@ study:
   n_trials: 20
   output_dir: outputs/optuna/ds002739
   command:
-    - powershell
-    - -ExecutionPolicy
-    - Bypass
-    - -File
-    - scripts/run_optuna_pretrain_and_finetune.ps1
+    - bash
+    - scripts_linux/run_optuna_pretrain_and_finetune.sh
   static_args:
-    - -TargetDataset
+    - --target-dataset
     - ds002739
-    - -PretrainDatasets
+    - --pretrain-datasets
     - ds002336,ds002338,ds002739
-  output_arg: -OutputRoot
+  output_arg: --output-root
 
 runtime_configs:
   train_base: configs/train_joint_contrastive.yaml
   finetune_base: configs/finetune_ds002739.yaml
-  train_arg: -JointTrainConfig
-  finetune_arg: -FinetuneConfig
+  train_arg: --joint-train-config
+  finetune_arg: --finetune-config
 
 metric:
   type: csv
@@ -144,7 +141,7 @@ modes:
   finetune_only:
     study_name: optuna_ds002739_finetune_only
     output_dir: outputs/optuna/ds002739_finetune_only
-    static_args: [-SkipPretrain]
+    static_args: [--skip-pretrain]
     metric:
       path: finetune/loso_finetune_summary.csv
       column: accuracy
@@ -155,7 +152,7 @@ modes:
   pretrain_only:
     study_name: optuna_ds002739_pretrain_only
     output_dir: outputs/optuna/ds002739_pretrain_only
-    static_args: [-SkipFinetune]
+    static_args: [--skip-finetune]
     metric:
       type: json
       path: contrastive/final_metrics.json

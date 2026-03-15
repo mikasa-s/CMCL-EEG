@@ -21,9 +21,12 @@ JOINT_OUTPUT_ROOT="outputs/joint_contrastive"
 DS002336_OUTPUT_ROOT="outputs/ds002336"
 DS002338_OUTPUT_ROOT="outputs/ds002338"
 DS002739_OUTPUT_ROOT="outputs/ds002739"
+PRETRAINED_WEIGHTS_DIR="pretrained_weights"
 JOINT_EEG_WINDOW_SEC="8.0"
 PRETRAIN_EPOCHS="0"
 FINETUNE_EPOCHS="0"
+PRETRAIN_BATCH_SIZE="0"
+FINETUNE_BATCH_SIZE="0"
 BATCH_SIZE="0"
 EVAL_BATCH_SIZE="0"
 NUM_WORKERS="-1"
@@ -31,6 +34,7 @@ SKIP_PRETRAIN="false"
 SKIP_FINETUNE="false"
 TEST_ONLY="false"
 FORCE_CPU="false"
+PYTHON_EXE=""
 
 parse_array_arg() {
     local raw="$1"
@@ -61,9 +65,12 @@ while [[ $# -gt 0 ]]; do
         --ds002336-output-root) DS002336_OUTPUT_ROOT="$2"; shift 2 ;;
         --ds002338-output-root) DS002338_OUTPUT_ROOT="$2"; shift 2 ;;
         --ds002739-output-root) DS002739_OUTPUT_ROOT="$2"; shift 2 ;;
+        --pretrained-weights-dir) PRETRAINED_WEIGHTS_DIR="$2"; shift 2 ;;
         --joint-eeg-window-sec) JOINT_EEG_WINDOW_SEC="$2"; shift 2 ;;
         --pretrain-epochs) PRETRAIN_EPOCHS="$2"; shift 2 ;;
         --finetune-epochs) FINETUNE_EPOCHS="$2"; shift 2 ;;
+        --pretrain-batch-size) PRETRAIN_BATCH_SIZE="$2"; shift 2 ;;
+        --finetune-batch-size) FINETUNE_BATCH_SIZE="$2"; shift 2 ;;
         --batch-size) BATCH_SIZE="$2"; shift 2 ;;
         --eval-batch-size) EVAL_BATCH_SIZE="$2"; shift 2 ;;
         --num-workers) NUM_WORKERS="$2"; shift 2 ;;
@@ -71,6 +78,7 @@ while [[ $# -gt 0 ]]; do
         --skip-finetune) SKIP_FINETUNE="true"; shift ;;
         --test-only) TEST_ONLY="true"; shift ;;
         --force-cpu) FORCE_CPU="true"; shift ;;
+        --python-exe) PYTHON_EXE="$2"; shift 2 ;;
         *) echo "Unknown option: $1" >&2; exit 2 ;;
     esac
 done
@@ -185,12 +193,17 @@ if [[ "${SKIP_PRETRAIN}" == "true" && "${SKIP_FINETUNE}" == "true" ]]; then
     echo "--skip-pretrain and --skip-finetune cannot both be set" >&2
     exit 2
 fi
+
+if [[ ${PRETRAIN_BATCH_SIZE} -le 0 && ${BATCH_SIZE} -gt 0 ]]; then PRETRAIN_BATCH_SIZE="${BATCH_SIZE}"; fi
+if [[ ${FINETUNE_BATCH_SIZE} -le 0 && ${BATCH_SIZE} -gt 0 ]]; then FINETUNE_BATCH_SIZE="${BATCH_SIZE}"; fi
 if [[ "${TEST_ONLY}" == "true" && "${SKIP_FINETUNE}" == "true" ]]; then
     echo "--test-only requires finetune stage" >&2
     exit 2
 fi
 
-if [[ -n "${CONDA_PREFIX:-}" && -x "${CONDA_PREFIX}/bin/python" ]]; then
+if [[ -n "${PYTHON_EXE}" ]]; then
+    PYTHON="${PYTHON_EXE}"
+elif [[ -n "${CONDA_PREFIX:-}" && -x "${CONDA_PREFIX}/bin/python" ]]; then
     PYTHON="${CONDA_PREFIX}/bin/python"
 else
     PYTHON="python"
@@ -198,9 +211,36 @@ fi
 
 cd "${REPO_ROOT}"
 
+resolve_dataset_root() {
+    local current_root="$1"
+    local dataset_name="$2"
+    if [[ -d "${current_root}" ]]; then
+        echo "${current_root}"
+        return
+    fi
+    local candidates=(
+        "data/${dataset_name}"
+        "../data/${dataset_name}"
+        "../${dataset_name}"
+    )
+    for candidate in "${candidates[@]}"; do
+        if [[ -d "${candidate}" ]]; then
+            echo "${candidate}"
+            return
+        fi
+    done
+    echo "${current_root}"
+}
+
+DS002336_ROOT="$(resolve_dataset_root "${DS002336_ROOT}" "ds002336")"
+DS002338_ROOT="$(resolve_dataset_root "${DS002338_ROOT}" "ds002338")"
+DS002739_ROOT="$(resolve_dataset_root "${DS002739_ROOT}" "ds002739")"
+
 joint_manifest_path="${JOINT_CACHE_ROOT}/manifest_all.csv"
 joint_channel_manifest="${JOINT_CACHE_ROOT}/eeg_channels_target.csv"
-joint_checkpoint_path="${JOINT_OUTPUT_ROOT}/contrastive/checkpoints/best.pth"
+joint_training_checkpoint_path="${JOINT_OUTPUT_ROOT}/contrastive/checkpoints/best.pth"
+joint_checkpoint_path="${PRETRAINED_WEIGHTS_DIR}/contrastive_best.pth"
+joint_checkpoint_source_path=""
 
 if [[ "${SKIP_PRETRAIN}" != "true" ]]; then
     if test_joint_cache_ready "${JOINT_CACHE_ROOT}"; then
@@ -236,12 +276,27 @@ if [[ "${SKIP_PRETRAIN}" != "true" ]]; then
         "--output-dir" "${JOINT_OUTPUT_ROOT}/contrastive"
     )
     if [[ ${PRETRAIN_EPOCHS} -gt 0 ]]; then train_args+=("--epochs" "${PRETRAIN_EPOCHS}"); fi
-    if [[ ${BATCH_SIZE} -gt 0 ]]; then train_args+=("--batch-size" "${BATCH_SIZE}"); fi
+    if [[ ${PRETRAIN_BATCH_SIZE} -gt 0 ]]; then train_args+=("--batch-size" "${PRETRAIN_BATCH_SIZE}"); fi
     if [[ ${NUM_WORKERS} -ge 0 ]]; then train_args+=("--num-workers" "${NUM_WORKERS}"); fi
     if [[ "${FORCE_CPU}" == "true" ]]; then train_args+=("--force-cpu"); fi
 
     echo "Running joint contrastive pretraining..."
     invoke_or_throw "joint pretraining" "${PYTHON}" "${train_args[@]}"
+
+    if [[ ! -f "${joint_training_checkpoint_path}" ]]; then
+        echo "Pretrain checkpoint not found after pretraining: ${joint_training_checkpoint_path}" >&2
+        exit 1
+    fi
+    mkdir -p "$(dirname "${joint_checkpoint_path}")"
+    cp -f "${joint_training_checkpoint_path}" "${joint_checkpoint_path}"
+    echo "Synced pretrain best checkpoint to: ${joint_checkpoint_path}"
+fi
+
+if [[ -f "${joint_checkpoint_path}" ]]; then
+    joint_checkpoint_source_path="${joint_checkpoint_path}"
+elif [[ -f "${joint_training_checkpoint_path}" ]]; then
+    joint_checkpoint_source_path="${joint_training_checkpoint_path}"
+    echo "Using fallback pretrain checkpoint path: ${joint_checkpoint_source_path}"
 fi
 
 if [[ "${SKIP_FINETUNE}" == "true" ]]; then
@@ -306,7 +361,14 @@ fi
 finetune_root="${target_output_root}/finetune"
 mkdir -p "${finetune_root}"
 
+if [[ -n "${joint_checkpoint_source_path}" ]]; then
+    echo "Using pretrain best checkpoint for finetune from: ${joint_checkpoint_source_path}"
+else
+    echo "Pretrain checkpoint not found at expected paths: ${joint_checkpoint_path} or ${joint_training_checkpoint_path}; finetune will run without contrastive checkpoint unless you pass --contrastive-checkpoint manually."
+fi
+
 for fold_dir in "${fold_dirs[@]}"; do
+    fold_start_seconds="$(date +%s)"
     fold_name="$(basename "${fold_dir}")"
     train_manifest="${fold_dir}/manifest_train.csv"
     val_manifest="${fold_dir}/manifest_val.csv"
@@ -328,8 +390,8 @@ for fold_dir in "${fold_dirs[@]}"; do
         "--root-dir" "${target_cache_root}"
         "--output-dir" "${fold_output_dir}"
     )
-    if [[ -f "${joint_checkpoint_path}" ]]; then
-        finetune_args+=("--contrastive-checkpoint" "${joint_checkpoint_path}")
+    if [[ -n "${joint_checkpoint_source_path}" ]]; then
+        finetune_args+=("--contrastive-checkpoint" "${joint_checkpoint_source_path}")
     fi
     if [[ "${TEST_ONLY}" == "true" ]]; then
         if [[ ! -f "${finetune_checkpoint}" ]]; then
@@ -339,13 +401,15 @@ for fold_dir in "${fold_dirs[@]}"; do
         finetune_args+=("--finetune-checkpoint" "${finetune_checkpoint}" "--test-only")
     fi
     if [[ ${FINETUNE_EPOCHS} -gt 0 ]]; then finetune_args+=("--epochs" "${FINETUNE_EPOCHS}"); fi
-    if [[ ${BATCH_SIZE} -gt 0 ]]; then finetune_args+=("--batch-size" "${BATCH_SIZE}"); fi
+    if [[ ${FINETUNE_BATCH_SIZE} -gt 0 ]]; then finetune_args+=("--batch-size" "${FINETUNE_BATCH_SIZE}"); fi
     if [[ ${EVAL_BATCH_SIZE} -gt 0 ]]; then finetune_args+=("--eval-batch-size" "${EVAL_BATCH_SIZE}"); fi
     if [[ ${NUM_WORKERS} -ge 0 ]]; then finetune_args+=("--num-workers" "${NUM_WORKERS}"); fi
     if [[ "${FORCE_CPU}" == "true" ]]; then finetune_args+=("--force-cpu"); fi
 
     echo "[${fold_name}] finetune"
     invoke_or_throw "finetune ${fold_name}" "${PYTHON}" "${finetune_args[@]}"
+    fold_end_seconds="$(date +%s)"
+    echo "[${fold_name}] fold_elapsed=$((fold_end_seconds - fold_start_seconds))s"
 done
 
 write_finetune_summary "${finetune_root}"

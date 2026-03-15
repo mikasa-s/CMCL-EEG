@@ -1,6 +1,5 @@
 param(
-    [ValidateSet("ds002336", "ds002338", "ds002739")]
-    [string[]]$PretrainDatasets = @("ds002336", "ds002338", "ds002739"),
+    [string]$PretrainDatasets = "ds002336,ds002338,ds002739",
     [ValidateSet("ds002336", "ds002338", "ds002739")]
     [string]$TargetDataset = "ds002739",
     [string]$JointTrainConfig = "configs/train_joint_contrastive.yaml",
@@ -18,16 +17,20 @@ param(
     [string]$Ds002336OutputRoot = "outputs/ds002336",
     [string]$Ds002338OutputRoot = "outputs/ds002338",
     [string]$Ds002739OutputRoot = "outputs/ds002739",
+    [string]$PretrainedWeightsDir = "pretrained_weights",
     [double]$JointEegWindowSec = 8.0,
     [int]$PretrainEpochs = 0,
     [int]$FinetuneEpochs = 0,
+    [int]$PretrainBatchSize = 0,
+    [int]$FinetuneBatchSize = 0,
     [int]$BatchSize = 0,
     [int]$EvalBatchSize = 0,
     [int]$NumWorkers = -1,
     [switch]$SkipPretrain,
     [switch]$SkipFinetune,
     [switch]$TestOnly,
-    [switch]$ForceCpu
+    [switch]$ForceCpu,
+    [string]$PythonExe = ""
 )
 
 function Invoke-CommandOrThrow {
@@ -161,8 +164,46 @@ function Write-FinetuneSummary {
     $summaryRows | Format-Table -AutoSize | Out-String | Write-Host
 }
 
+function Resolve-DatasetRoot {
+    param(
+        [Parameter(Mandatory = $true)][string]$CurrentRoot,
+        [Parameter(Mandatory = $true)][string]$DatasetName,
+        [Parameter(Mandatory = $true)][string]$RepoRoot
+    )
+
+    if (Test-Path $CurrentRoot) {
+        return $CurrentRoot
+    }
+
+    $candidates = @(
+        (Join-Path $RepoRoot ("data/" + $DatasetName)),
+        (Join-Path $RepoRoot ("../data/" + $DatasetName)),
+        (Join-Path $RepoRoot ("../" + $DatasetName))
+    )
+    foreach ($candidate in $candidates) {
+        if (Test-Path $candidate) {
+            return $candidate
+        }
+    }
+    return $CurrentRoot
+}
+
 $ErrorActionPreference = "Stop"
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
+
+$Ds002336Root = Resolve-DatasetRoot -CurrentRoot $Ds002336Root -DatasetName "ds002336" -RepoRoot $repoRoot
+$Ds002338Root = Resolve-DatasetRoot -CurrentRoot $Ds002338Root -DatasetName "ds002338" -RepoRoot $repoRoot
+$Ds002739Root = Resolve-DatasetRoot -CurrentRoot $Ds002739Root -DatasetName "ds002739" -RepoRoot $repoRoot
+
+$allowedPretrainDatasets = @("ds002336", "ds002338", "ds002739")
+$pretrainDatasetList = @($PretrainDatasets.Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+if ($pretrainDatasetList.Count -eq 0) {
+    $pretrainDatasetList = @("ds002336", "ds002338", "ds002739")
+}
+$invalidPretrain = @($pretrainDatasetList | Where-Object { $_ -notin $allowedPretrainDatasets })
+if ($invalidPretrain.Count -gt 0) {
+    throw "Invalid PretrainDatasets values: $($invalidPretrain -join ', '). Allowed: $($allowedPretrainDatasets -join ', ')"
+}
 
 if ($SkipPretrain -and $SkipFinetune) {
     throw "SkipPretrain and SkipFinetune cannot both be set"
@@ -172,7 +213,17 @@ if ($TestOnly -and $SkipFinetune) {
     throw "TestOnly requires the finetune stage and cannot be combined with SkipFinetune"
 }
 
-if ($env:CONDA_PREFIX) {
+if ($PretrainBatchSize -le 0 -and $BatchSize -gt 0) {
+    $PretrainBatchSize = $BatchSize
+}
+if ($FinetuneBatchSize -le 0 -and $BatchSize -gt 0) {
+    $FinetuneBatchSize = $BatchSize
+}
+
+if ($PythonExe.Trim()) {
+    $python = $PythonExe
+}
+elseif ($env:CONDA_PREFIX) {
     $python = Join-Path $env:CONDA_PREFIX "python.exe"
 }
 else {
@@ -180,7 +231,9 @@ else {
 }
 $jointManifestPath = Join-Path $JointCacheRoot "manifest_all.csv"
 $jointChannelManifest = Join-Path $JointCacheRoot "eeg_channels_target.csv"
-$jointCheckpointPath = Join-Path $JointOutputRoot "contrastive\checkpoints\best.pth"
+$jointTrainingCheckpointPath = Join-Path $JointOutputRoot "contrastive\checkpoints\best.pth"
+$jointCheckpointPath = Join-Path $PretrainedWeightsDir "contrastive_best.pth"
+$jointCheckpointSourcePath = ""
 
 if (!$SkipPretrain) {
     if (Test-JointCacheReady -CacheRoot $JointCacheRoot) {
@@ -194,9 +247,9 @@ if (!$SkipPretrain) {
             "-EegWindowSec", $JointEegWindowSec.ToString(),
             "-PythonExe", $python
         )
-        if ($PretrainDatasets.Count -gt 0) {
+        if ($pretrainDatasetList.Count -gt 0) {
             $jointPrepareArgs += "-Datasets"
-            $jointPrepareArgs += $PretrainDatasets
+            $jointPrepareArgs += ($pretrainDatasetList -join ",")
         }
         if ($NumWorkers -ge 1) {
             $jointPrepareArgs += @("-NumWorkers", $NumWorkers.ToString())
@@ -218,8 +271,8 @@ if (!$SkipPretrain) {
     if ($PretrainEpochs -gt 0) {
         $trainArgs += @("--epochs", $PretrainEpochs.ToString())
     }
-    if ($BatchSize -gt 0) {
-        $trainArgs += @("--batch-size", $BatchSize.ToString())
+    if ($PretrainBatchSize -gt 0) {
+        $trainArgs += @("--batch-size", $PretrainBatchSize.ToString())
     }
     if ($NumWorkers -ge 0) {
         $trainArgs += @("--num-workers", $NumWorkers.ToString())
@@ -230,6 +283,24 @@ if (!$SkipPretrain) {
 
     Write-Host "Running joint contrastive pretraining..."
     Invoke-CommandOrThrow -Executable $python -Args $trainArgs -StepName "joint pretraining"
+
+    if (!(Test-Path $jointTrainingCheckpointPath)) {
+        throw "Pretrain checkpoint not found after pretraining: $jointTrainingCheckpointPath"
+    }
+    $jointCheckpointParent = Split-Path -Parent $jointCheckpointPath
+    if ($jointCheckpointParent) {
+        New-Item -ItemType Directory -Force -Path $jointCheckpointParent | Out-Null
+    }
+    Copy-Item -Path $jointTrainingCheckpointPath -Destination $jointCheckpointPath -Force
+    Write-Host ("Synced pretrain best checkpoint to: " + $jointCheckpointPath)
+}
+
+if (Test-Path $jointCheckpointPath) {
+    $jointCheckpointSourcePath = $jointCheckpointPath
+}
+elseif (Test-Path $jointTrainingCheckpointPath) {
+    $jointCheckpointSourcePath = $jointTrainingCheckpointPath
+    Write-Host ("Using fallback pretrain checkpoint path: " + $jointCheckpointSourcePath)
 }
 
 if ($SkipFinetune) {
@@ -280,12 +351,20 @@ if ($foldDirs.Count -eq 0) {
 $finetuneRoot = Join-Path $targetOutputRoot "finetune"
 New-Item -ItemType Directory -Force -Path $finetuneRoot | Out-Null
 
+if ($jointCheckpointSourcePath) {
+    Write-Host ("Using pretrain best checkpoint for finetune from: " + $jointCheckpointSourcePath)
+}
+else {
+    Write-Host ("Pretrain checkpoint not found at expected paths: " + $jointCheckpointPath + " or " + $jointTrainingCheckpointPath + "; finetune will run without contrastive checkpoint unless you pass --contrastive-checkpoint manually.")
+}
+
 $foldNameMap = @{}
 for ($foldIndex = 0; $foldIndex -lt $foldDirs.Count; $foldIndex++) {
     $foldNameMap[$foldDirs[$foldIndex].Name] = "fold$($foldIndex + 1)"
 }
 
 foreach ($foldDir in $foldDirs) {
+    $foldStartTime = Get-Date
     $foldName = $foldDir.Name
     $trainManifest = Join-Path $foldDir.FullName "manifest_train.csv"
     $valManifest = Join-Path $foldDir.FullName "manifest_val.csv"
@@ -305,8 +384,8 @@ foreach ($foldDir in $foldDirs) {
         "--root-dir", $targetCacheRoot,
         "--output-dir", $foldOutputDir
     )
-    if (Test-Path $jointCheckpointPath) {
-        $finetuneArgs += @("--contrastive-checkpoint", $jointCheckpointPath)
+    if ($jointCheckpointSourcePath) {
+        $finetuneArgs += @("--contrastive-checkpoint", $jointCheckpointSourcePath)
     }
     if ($TestOnly) {
         if (!(Test-Path $finetuneCheckpoint)) {
@@ -317,8 +396,8 @@ foreach ($foldDir in $foldDirs) {
     if ($FinetuneEpochs -gt 0) {
         $finetuneArgs += @("--epochs", $FinetuneEpochs.ToString())
     }
-    if ($BatchSize -gt 0) {
-        $finetuneArgs += @("--batch-size", $BatchSize.ToString())
+    if ($FinetuneBatchSize -gt 0) {
+        $finetuneArgs += @("--batch-size", $FinetuneBatchSize.ToString())
     }
     if ($EvalBatchSize -gt 0) {
         $finetuneArgs += @("--eval-batch-size", $EvalBatchSize.ToString())
@@ -332,6 +411,8 @@ foreach ($foldDir in $foldDirs) {
 
     Write-Host ("[" + $foldNameMap[$foldName] + "] finetune")
     Invoke-CommandOrThrow -Executable $python -Args $finetuneArgs -StepName ("finetune " + $foldName)
+    $foldElapsedSeconds = ((Get-Date) - $foldStartTime).TotalSeconds
+    Write-Host ("[" + $foldNameMap[$foldName] + "] fold_elapsed=" + ([math]::Round($foldElapsedSeconds, 1)) + "s")
 }
 
 Write-FinetuneSummary -FinetuneRoot $finetuneRoot -FoldNameMap $foldNameMap

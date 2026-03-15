@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from contextlib import nullcontext
 from pathlib import Path
+import time
 from typing import Any
 
 import torch
@@ -11,8 +12,9 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, DistributedSampler
 
 from .datasets import PairedEEGfMRIDataset
-from .distributed import cleanup_distributed, configure_cudnn, configure_runtime_devices, init_distributed, is_dist_initialized, is_main_process, runtime_summary
+from .distributed import cleanup_distributed, configure_cudnn, configure_runtime_devices, gather_tensor, init_distributed, is_dist_initialized, is_main_process, runtime_summary
 from .losses import SymmetricInfoNCELoss
+from .metrics import contrastive_retrieval_metrics
 from .models import EEGfMRIContrastiveModel
 
 
@@ -232,17 +234,13 @@ class ContrastiveTrainer:
         with open(self.output_dir / name, "w", encoding="utf-8") as handle:
             json.dump(metrics, handle, ensure_ascii=False, indent=2)
 
-    def train_one_epoch(self, epoch: int) -> tuple[float, float, float]:
+    def train_one_epoch(self, epoch: int) -> float:
         """执行一个 epoch 的对比学习训练。"""
         if self.sampler is not None:
             self.sampler.set_epoch(epoch)
 
         self.model.train()
         running = 0.0
-        eeg_seconds = 0.0
-        fmri_seconds = 0.0
-        eeg_event_pairs: list[tuple[torch.cuda.Event, torch.cuda.Event]] = []
-        fmri_event_pairs: list[tuple[torch.cuda.Event, torch.cuda.Event]] = []
 
         for step, batch in enumerate(self.train_loader, start=1):
             eeg = batch["eeg"].to(self.device, non_blocking=True)
@@ -256,15 +254,6 @@ class ContrastiveTrainer:
             with autocast_ctx:
                 out = self.model(eeg=eeg, fmri=fmri)
                 loss = self.criterion(out["eeg_embed"], out["fmri_embed"])
-
-            timing = out.get("timing", {})
-            timing_mode = timing.get("mode")
-            if timing_mode == "cuda_events":
-                eeg_event_pairs.append(timing["eeg_events"])
-                fmri_event_pairs.append(timing["fmri_events"])
-            elif timing_mode == "cpu_perf_counter":
-                eeg_seconds += float(timing.get("eeg_seconds", 0.0))
-                fmri_seconds += float(timing.get("fmri_seconds", 0.0))
 
             if self.scaler.is_enabled():
                 self.scaler.scale(loss).backward()
@@ -286,32 +275,54 @@ class ContrastiveTrainer:
                 self.scheduler.step()
             running += float(loss.item())
 
-        if eeg_event_pairs or fmri_event_pairs:
-            torch.cuda.synchronize(self.device)
-            eeg_seconds += sum(start.elapsed_time(end) for start, end in eeg_event_pairs) / 1000.0
-            fmri_seconds += sum(start.elapsed_time(end) for start, end in fmri_event_pairs) / 1000.0
-
         epoch_loss = running / max(1, len(self.train_loader))
-        return epoch_loss, eeg_seconds, fmri_seconds
+        return epoch_loss
+
+    def evaluate_retrieval(self) -> dict[str, float]:
+        """在当前训练集上计算双向检索指标（R@1/R@5）。"""
+        self.model.eval()
+        gathered_eeg: list[torch.Tensor] = []
+        gathered_fmri: list[torch.Tensor] = []
+
+        with torch.no_grad():
+            for batch in self.train_loader:
+                eeg = batch["eeg"].to(self.device, non_blocking=True)
+                fmri = batch["fmri"].to(self.device, non_blocking=True)
+                out = self.model(eeg=eeg, fmri=fmri)
+                eeg_embed = gather_tensor(out["eeg_embed"].detach())
+                fmri_embed = gather_tensor(out["fmri_embed"].detach())
+                if is_main_process():
+                    gathered_eeg.append(eeg_embed.cpu())
+                    gathered_fmri.append(fmri_embed.cpu())
+
+        if not is_main_process() or not gathered_eeg or not gathered_fmri:
+            return {}
+
+        eeg_all = torch.cat(gathered_eeg, dim=0)
+        fmri_all = torch.cat(gathered_fmri, dim=0)
+        return contrastive_retrieval_metrics(eeg_all, fmri_all)
 
     def fit(self) -> None:
         """执行完整训练流程，并按训练 loss 选择最好 checkpoint。"""
+        stage_start_time = time.perf_counter()
         best = float("inf")
         best_epoch = 0
         last_train_loss = float("nan")
+        last_retrieval_metrics: dict[str, float] = {}
         for epoch in range(self.start_epoch, self.epochs + 1):
-            train_loss, eeg_model_seconds, fmri_model_seconds = self.train_one_epoch(epoch)
+            train_loss = self.train_one_epoch(epoch)
             last_train_loss = train_loss
-            current_score = train_loss
+            last_retrieval_metrics = self.evaluate_retrieval()
 
             if is_main_process():
                 summary_parts = [
                     f"epoch={epoch:03d}/{self.epochs:03d}",
                     f"train_loss={train_loss:.6f}",
                     f"lr={self.optimizer.param_groups[0]['lr']:.3e}",
-                    f"eeg_model_time={eeg_model_seconds:.1f}s",
-                    f"fmri_model_time={fmri_model_seconds:.1f}s",
                 ]
+                if last_retrieval_metrics:
+                    summary_parts.append(f"mean_r1={last_retrieval_metrics.get('mean_r1', float('nan')):.4f}")
+                    summary_parts.append(f"mean_r5={last_retrieval_metrics.get('mean_r5', float('nan')):.4f}")
                 print("Contrastive " + ", ".join(summary_parts), flush=True)
 
             if train_loss < best:
@@ -319,13 +330,22 @@ class ContrastiveTrainer:
                 best_epoch = epoch
                 self.save_checkpoint(epoch, best, "best.pth", extra={"train_loss": train_loss})
 
+        fold_elapsed_seconds = time.perf_counter() - stage_start_time
         final_metrics = {
             "epochs": self.epochs,
             "best_epoch": best_epoch,
             "best_score": best,
             "selection_mode": "train_loss",
             "last_train_loss": last_train_loss,
+            "last_retrieval_metrics": last_retrieval_metrics,
+            "fold_elapsed_seconds": fold_elapsed_seconds,
         }
+        if is_main_process():
+            print(
+                "Contrastive fold summary: "
+                f"fold_elapsed={fold_elapsed_seconds:.1f}s",
+                flush=True,
+            )
         self.save_metrics("final_metrics.json", final_metrics)
         cleanup_distributed()
 

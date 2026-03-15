@@ -3,6 +3,7 @@ from __future__ import annotations
 """微调阶段可选的 EEG baseline 模型。"""
 
 from collections import OrderedDict
+from pathlib import Path
 from typing import Any
 
 import torch
@@ -10,6 +11,7 @@ import torch.nn as nn
 
 from ..checkpoint_utils import extract_state_dict, filter_compatible_state_dict, load_checkpoint_file, strip_prefixes
 from ..models.eeg_adapter import EEGCBraModAdapter
+from ..models.eeg_labram_adapter import EEGLaBraMAdapter
 
 
 def flatten_eeg_to_timeseries(eeg: torch.Tensor) -> torch.Tensor:
@@ -115,6 +117,7 @@ class EEGBaselineModel(nn.Module):
         baseline_cfg = dict(finetune_cfg.get("eeg_baseline", {}))
         self.category = str(baseline_cfg.get("category", "foundation")).strip().lower()
         self.model_name = str(baseline_cfg.get("model_name", "cbramod")).strip().lower()
+        self.load_pretrained_weights = bool(baseline_cfg.get("load_pretrained_weights", True))
         self.produces_logits = self.category == "traditional"
 
         expected_shape = data_cfg.get("expected_eeg_shape", [])
@@ -150,26 +153,57 @@ class EEGBaselineModel(nn.Module):
                 )
             else:
                 raise ValueError("Unsupported traditional EEG baseline model. Expected one of: conv1d, cnn, shallowconv1d, lstm, bilstm")
-            self.initialization_summary = f"EEG baseline: category=traditional, model={self.model_name}, direct_logits=true."
+            self.initialization_summary = (
+                f"EEG baseline: category=traditional, model={self.model_name}, direct_logits=true, "
+                "pretrained_weights=disabled."
+            )
         elif self.category == "foundation":
             if self.model_name == "cbramod":
                 self.model = EEGCBraModAdapter(**eeg_cfg)
                 self.feature_dim = int(self.model.feature_dim)
                 contrastive_checkpoint = str(finetune_cfg.get("contrastive_checkpoint_path", "")).strip()
-                if contrastive_checkpoint:
+                if self.load_pretrained_weights and contrastive_checkpoint:
                     report = load_contrastive_eeg_encoder_weights(self.model, contrastive_checkpoint)
                     self.initialization_summary = (
                         f"EEG baseline: category=foundation, model=cbramod, loaded contrastive EEG encoder "
                         f"({report['loaded_count']} tensors)."
                     )
+                elif contrastive_checkpoint and not self.load_pretrained_weights:
+                    self.initialization_summary = (
+                        "EEG baseline: category=foundation, model=cbramod, "
+                        "pretrained loading disabled; initialized from random weights."
+                    )
                 else:
-                    self.initialization_summary = "EEG baseline: category=foundation, model=cbramod."
+                    self.initialization_summary = "EEG baseline: category=foundation, model=cbramod, random_init=true."
+            elif self.model_name in {"labram", "labram_base_patch200_200"}:
+                labram_model_name = str(baseline_cfg.get("labram_model_name", "labram_base_patch200_200")).strip() or "labram_base_patch200_200"
+                labram_checkpoint = str(baseline_cfg.get("labram_checkpoint_path", "")).strip()
+                if labram_checkpoint and not Path(labram_checkpoint).is_absolute():
+                    labram_checkpoint = str(Path(__file__).resolve().parents[2] / labram_checkpoint)
+                self.model = EEGLaBraMAdapter(
+                    model_name=labram_model_name,
+                    checkpoint_path=labram_checkpoint if self.load_pretrained_weights else "",
+                    freeze_backbone=bool(eeg_cfg.get("freeze_backbone", False)),
+                )
+                self.feature_dim = int(self.model.feature_dim)
+                if self.load_pretrained_weights and labram_checkpoint:
+                    self.initialization_summary = (
+                        "EEG baseline: category=foundation, model=labram, "
+                        f"checkpoint={labram_checkpoint}."
+                    )
+                elif labram_checkpoint and not self.load_pretrained_weights:
+                    self.initialization_summary = (
+                        "EEG baseline: category=foundation, model=labram, "
+                        "pretrained loading disabled; initialized from random weights."
+                    )
+                else:
+                    self.initialization_summary = "EEG baseline: category=foundation, model=labram, random_init=true."
             elif self.model_name in {"patch_mlp", "mlp"}:
                 self.model = FoundationPatchMLPEncoder(patch_dim=patch_dim, feature_dim=hidden_dim, dropout=dropout)
                 self.feature_dim = int(self.model.feature_dim)
                 self.initialization_summary = "EEG baseline: category=foundation, model=patch_mlp."
             else:
-                raise ValueError("Unsupported foundation EEG baseline model. Expected one of: cbramod, patch_mlp, mlp")
+                raise ValueError("Unsupported foundation EEG baseline model. Expected one of: cbramod, labram, patch_mlp, mlp")
         else:
             raise ValueError("finetune.eeg_baseline.category must be either 'traditional' or 'foundation'")
 

@@ -33,7 +33,7 @@ eeg_model:
   out_dim: 200
   d_model: 200
   dim_feedforward: 800
-  seq_len: 20
+  seq_len: 8
   n_layer: 12
   nhead: 8
   freeze_backbone: false
@@ -64,10 +64,13 @@ finetune:
     enabled: false
     category: foundation
     model_name: cbramod
+    load_pretrained_weights: true
     feature_dim: 256
     dropout: 0.2
     traditional_hidden_dim: 128
     traditional_num_layers: 2
+    labram_model_name: labram_base_patch200_200
+    labram_checkpoint_path: pretrained_weights/labram-base.pth
   hidden_dim: 256
   dropout: 0.2
   freeze_encoders: false

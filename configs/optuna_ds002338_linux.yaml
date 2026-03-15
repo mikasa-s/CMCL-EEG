@@ -1,27 +1,24 @@
 study:
-  name: optuna_ds002739
+  name: optuna_ds002338
   default_mode: full
   direction: maximize
   n_trials: 20
-  output_dir: outputs/optuna/ds002739
+  output_dir: outputs/optuna/ds002338
   command:
-    - powershell
-    - -ExecutionPolicy
-    - Bypass
-    - -File
-    - scripts/run_optuna_pretrain_and_finetune.ps1
+    - bash
+    - scripts_linux/run_optuna_pretrain_and_finetune.sh
   static_args:
-    - -TargetDataset
-    - ds002739
-    - -PretrainDatasets
+    - --target-dataset
+    - ds002338
+    - --pretrain-datasets
     - ds002336,ds002338,ds002739
-  output_arg: -OutputRoot
+  output_arg: --output-root
 
 runtime_configs:
   train_base: configs/train_joint_contrastive.yaml
-  finetune_base: configs/finetune_ds002739.yaml
-  train_arg: -JointTrainConfig
-  finetune_arg: -FinetuneConfig
+  finetune_base: configs/finetune_ds002338.yaml
+  train_arg: --joint-train-config
+  finetune_arg: --finetune-config
 
 metric:
   type: csv
@@ -33,7 +30,7 @@ metric:
 parameters:
   train_epochs:
     suggest: categorical
-    choices: [10, 20, 30]
+    choices: [20, 30]
     target: config
     config_updates:
       - config: train
@@ -43,7 +40,7 @@ parameters:
 
   pretrain_batch_size:
     suggest: categorical
-    choices: [32, 64]
+    choices: [8, 16]
     target: config
     config_updates:
       - config: train
@@ -53,7 +50,7 @@ parameters:
 
   finetune_batch_size:
     suggest: categorical
-    choices: [32, 64]
+    choices: [8, 16]
     target: config
     config_updates:
       - config: finetune
@@ -63,7 +60,7 @@ parameters:
 
   pretrain_lr:
     suggest: float
-    low: 1e-4
+    low: 1e-5
     high: 1e-3
     log: true
     target: config
@@ -73,7 +70,7 @@ parameters:
 
   finetune_lr:
     suggest: float
-    low: 1e-4
+    low: 1e-5
     high: 1e-3
     log: true
     target: config
@@ -125,7 +122,7 @@ parameters:
 
   early_stop_patience:
     suggest: categorical
-    choices: [2, 3, 5, 8]
+    choices: [5, 8, 10]
     target: config
     config_updates:
       - config: finetune
@@ -137,14 +134,14 @@ parameter_groups:
 
 modes:
   full:
-    study_name: optuna_ds002739_full
-    output_dir: outputs/optuna/ds002739_full
+    study_name: optuna_ds002338_full
+    output_dir: outputs/optuna/ds002338_full
     parameter_groups: [pretrain, finetune]
 
   finetune_only:
-    study_name: optuna_ds002739_finetune_only
-    output_dir: outputs/optuna/ds002739_finetune_only
-    static_args: [-SkipPretrain]
+    study_name: optuna_ds002338_finetune_only
+    output_dir: outputs/optuna/ds002338_finetune_only
+    static_args: [--skip-pretrain]
     metric:
       path: finetune/loso_finetune_summary.csv
       column: accuracy
@@ -153,9 +150,9 @@ modes:
     parameter_groups: [finetune]
 
   pretrain_only:
-    study_name: optuna_ds002739_pretrain_only
-    output_dir: outputs/optuna/ds002739_pretrain_only
-    static_args: [-SkipFinetune]
+    study_name: optuna_ds002338_pretrain_only
+    output_dir: outputs/optuna/ds002338_pretrain_only
+    static_args: [--skip-finetune]
     metric:
       type: json
       path: contrastive/final_metrics.json

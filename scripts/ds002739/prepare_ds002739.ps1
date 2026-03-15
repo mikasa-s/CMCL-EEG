@@ -105,3 +105,6 @@ Write-Host ("Split mode: " + $SplitMode)
 Write-Host ("Training ready: " + $TrainingReady)
 Write-Host "fMRI preprocessing: resample to 2.0x2.0x2.0 mm, then center-crop to 48x48x48"
 & $python @cliArgs
+if ($LASTEXITCODE -ne 0) {
+    throw "ds002739 preprocessing failed with exit code $LASTEXITCODE"
+}

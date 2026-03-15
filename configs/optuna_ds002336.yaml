@@ -14,8 +14,7 @@ study:
     - -TargetDataset
     - ds002336
     - -PretrainDatasets
-    - ds002336
-    - ds002739
+    - ds002336,ds002338,ds002739
   output_arg: -OutputRoot
 
 runtime_configs:
@@ -34,7 +33,7 @@ metric:
 parameters:
   train_epochs:
     suggest: categorical
-    choices: [20, 30]
+    choices: [100]
     target: config
     config_updates:
       - config: train
@@ -42,21 +41,27 @@ parameters:
       - config: finetune
         key: finetune.epochs
 
-  batch_size:
+  pretrain_batch_size:
     suggest: categorical
-    choices: [8, 16]
+    choices: [16, 32, 64, 128]
     target: config
     config_updates:
       - config: train
         key: train.batch_size
       - config: train
         key: train.eval_batch_size
+
+  finetune_batch_size:
+    suggest: categorical
+    choices: [16, 32, 64, 128]
+    target: config
+    config_updates:
       - config: finetune
         key: train.batch_size
       - config: finetune
         key: train.eval_batch_size
 
-  lr:
+  pretrain_lr:
     suggest: float
     low: 1e-5
     high: 1e-3
@@ -65,6 +70,14 @@ parameters:
     config_updates:
       - config: train
         key: train.lr
+
+  finetune_lr:
+    suggest: float
+    low: 1e-5
+    high: 1e-3
+    log: true
+    target: config
+    config_updates:
       - config: finetune
         key: finetune.lr
 
@@ -119,8 +132,10 @@ parameters:
         key: finetune.early_stop_patience
 
 parameter_groups:
-  pretrain: [train_epochs, batch_size, lr, weight_decay, min_lr, grad_clip]
-  finetune: [train_epochs, batch_size, lr, weight_decay, min_lr, hidden_dim, grad_clip, early_stop_patience]
+  pretrain: [pretrain_batch_size, pretrain_lr]
+  finetune: [finetune_batch_size, finetune_lr]
+  # pretrain: [train_epochs, batch_size, lr, weight_decay, min_lr, grad_clip]
+  # finetune: [train_epochs, batch_size, lr, weight_decay, min_lr, hidden_dim, grad_clip, early_stop_patience]
 
 modes:
   full:

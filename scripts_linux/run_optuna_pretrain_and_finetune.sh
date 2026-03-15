@@ -4,14 +4,17 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-PRETRAIN_DATASETS=("ds002336" "ds002739")
+PRETRAIN_DATASETS=("ds002336" "ds002338" "ds002739")
 TARGET_DATASET="ds002739"
 JOINT_TRAIN_CONFIG="configs/train_joint_contrastive.yaml"
 FINETUNE_CONFIG="configs/finetune_ds002739.yaml"
 OUTPUT_ROOT="outputs/optuna_run"
+CACHE_ROOT="cache"
 JOINT_EEG_WINDOW_SEC="8.0"
 PRETRAIN_EPOCHS="0"
 FINETUNE_EPOCHS="0"
+PRETRAIN_BATCH_SIZE="0"
+FINETUNE_BATCH_SIZE="0"
 BATCH_SIZE="0"
 EVAL_BATCH_SIZE="0"
 NUM_WORKERS="-1"
@@ -19,6 +22,7 @@ SKIP_PRETRAIN="false"
 SKIP_FINETUNE="false"
 TEST_ONLY="false"
 FORCE_CPU="false"
+PYTHON_EXE=""
 
 parse_array_arg() {
     local raw="$1"
@@ -37,9 +41,12 @@ while [[ $# -gt 0 ]]; do
         --joint-train-config) JOINT_TRAIN_CONFIG="$2"; shift 2 ;;
         --finetune-config) FINETUNE_CONFIG="$2"; shift 2 ;;
         --output-root) OUTPUT_ROOT="$2"; shift 2 ;;
+        --cache-root) CACHE_ROOT="$2"; shift 2 ;;
         --joint-eeg-window-sec) JOINT_EEG_WINDOW_SEC="$2"; shift 2 ;;
         --pretrain-epochs) PRETRAIN_EPOCHS="$2"; shift 2 ;;
         --finetune-epochs) FINETUNE_EPOCHS="$2"; shift 2 ;;
+        --pretrain-batch-size) PRETRAIN_BATCH_SIZE="$2"; shift 2 ;;
+        --finetune-batch-size) FINETUNE_BATCH_SIZE="$2"; shift 2 ;;
         --batch-size) BATCH_SIZE="$2"; shift 2 ;;
         --eval-batch-size) EVAL_BATCH_SIZE="$2"; shift 2 ;;
         --num-workers) NUM_WORKERS="$2"; shift 2 ;;
@@ -47,6 +54,7 @@ while [[ $# -gt 0 ]]; do
         --skip-finetune) SKIP_FINETUNE="true"; shift ;;
         --test-only) TEST_ONLY="true"; shift ;;
         --force-cpu) FORCE_CPU="true"; shift ;;
+        --python-exe) PYTHON_EXE="$2"; shift 2 ;;
         *) echo "Unknown option: $1" >&2; exit 2 ;;
     esac
 done
@@ -59,14 +67,21 @@ else
     resolved_output_root="$(cd . && pwd)/${OUTPUT_ROOT}"
 fi
 
-joint_cache_root="${resolved_output_root}/cache/joint_contrastive"
-ds002336_cache_root="${resolved_output_root}/cache/ds002336"
-ds002338_cache_root="${resolved_output_root}/cache/ds002338"
-ds002739_cache_root="${resolved_output_root}/cache/ds002739"
+if [[ "${CACHE_ROOT}" = /* ]]; then
+    resolved_cache_root="${CACHE_ROOT}"
+else
+    resolved_cache_root="$(cd . && pwd)/${CACHE_ROOT}"
+fi
+
+joint_cache_root="${resolved_cache_root}/joint_contrastive"
+ds002336_cache_root="${resolved_cache_root}/ds002336"
+ds002338_cache_root="${resolved_cache_root}/ds002338"
+ds002739_cache_root="${resolved_cache_root}/ds002739"
 shared_output_root="${resolved_output_root}"
 
 args=(
     "${REPO_ROOT}/scripts_linux/run_pretrain_and_finetune.sh"
+    "--python-exe" "${PYTHON_EXE}"
     "--pretrain-datasets" "$(IFS=,; echo "${PRETRAIN_DATASETS[*]}")"
     "--target-dataset" "${TARGET_DATASET}"
     "--joint-train-config" "${JOINT_TRAIN_CONFIG}"
@@ -83,6 +98,8 @@ args=(
 
 if [[ "${TARGET_DATASET}" == "ds002336" ]]; then
     args+=("--ds002336-finetune-config" "${FINETUNE_CONFIG}")
+elif [[ "${TARGET_DATASET}" == "ds002338" ]]; then
+    args+=("--ds002338-finetune-config" "${FINETUNE_CONFIG}")
 else
     args+=("--ds002739-finetune-config" "${FINETUNE_CONFIG}")
 fi
@@ -90,6 +107,8 @@ fi
 if [[ ${PRETRAIN_EPOCHS} -gt 0 ]]; then args+=("--pretrain-epochs" "${PRETRAIN_EPOCHS}"); fi
 if [[ ${FINETUNE_EPOCHS} -gt 0 ]]; then args+=("--finetune-epochs" "${FINETUNE_EPOCHS}"); fi
 if [[ ${BATCH_SIZE} -gt 0 ]]; then args+=("--batch-size" "${BATCH_SIZE}"); fi
+if [[ ${PRETRAIN_BATCH_SIZE} -gt 0 ]]; then args+=("--pretrain-batch-size" "${PRETRAIN_BATCH_SIZE}"); fi
+if [[ ${FINETUNE_BATCH_SIZE} -gt 0 ]]; then args+=("--finetune-batch-size" "${FINETUNE_BATCH_SIZE}"); fi
 if [[ ${EVAL_BATCH_SIZE} -gt 0 ]]; then args+=("--eval-batch-size" "${EVAL_BATCH_SIZE}"); fi
 if [[ ${NUM_WORKERS} -ge 0 ]]; then args+=("--num-workers" "${NUM_WORKERS}"); fi
 if [[ "${SKIP_PRETRAIN}" == "true" ]]; then args+=("--skip-pretrain"); fi

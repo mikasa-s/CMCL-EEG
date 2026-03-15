@@ -15,6 +15,8 @@ VAL_SUBJECTS="2"
 TEST_SUBJECTS="1"
 EEG_SEQ_LEN="8"
 EEG_PATCH_LEN="200"
+BLOCK_WINDOW_SEC="8.0"
+BLOCK_OVERLAP_SEC="2.0"
 DROP_ECG="true"
 TRAINING_READY="true"
 EEG_ONLY="true"
@@ -45,6 +47,8 @@ while [[ $# -gt 0 ]]; do
         --test-subjects) TEST_SUBJECTS="$2"; shift 2 ;;
         --eeg-seq-len) EEG_SEQ_LEN="$2"; shift 2 ;;
         --eeg-patch-len) EEG_PATCH_LEN="$2"; shift 2 ;;
+        --block-window-sec) BLOCK_WINDOW_SEC="$2"; shift 2 ;;
+        --block-overlap-sec) BLOCK_OVERLAP_SEC="$2"; shift 2 ;;
         --drop-ecg) DROP_ECG="true"; shift ;;
         --no-drop-ecg) DROP_ECG="false"; shift ;;
         --training-ready) TRAINING_READY="true"; shift ;;
@@ -67,6 +71,20 @@ else
 fi
 
 cd "${REPO_ROOT}"
+
+if [[ ! -d "${DS_ROOT}" ]]; then
+    candidates=(
+        "data/${DATASET_NAME}"
+        "../data/${DATASET_NAME}"
+        "../${DATASET_NAME}"
+    )
+    for candidate in "${candidates[@]}"; do
+        if [[ -d "${candidate}" ]]; then
+            DS_ROOT="${candidate}"
+            break
+        fi
+    done
+fi
 
 if [[ ${#TASKS[@]} -eq 0 ]]; then
     if [[ "${DATASET_NAME}" == "ds002336" ]]; then
@@ -110,6 +128,8 @@ CLI_ARGS=(
     "--eeg-mode" "patched"
     "--eeg-seq-len" "${EEG_SEQ_LEN}"
     "--eeg-patch-len" "${EEG_PATCH_LEN}"
+    "--block-window-sec" "${BLOCK_WINDOW_SEC}"
+    "--block-overlap-sec" "${BLOCK_OVERLAP_SEC}"
     "--tr" "2.0"
     "--fmri-max-shape" "48" "48" "48"
     "--split-mode" "${SPLIT_MODE}"

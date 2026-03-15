@@ -3,6 +3,8 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -127,9 +129,9 @@ def normalize_study_config(raw: dict[str, Any], args: argparse.Namespace, config
                 raise ValueError(f"Unknown parameter names in mode '{mode_name}': {missing}")
             normalized["parameters"] = {name: normalized["parameters"][name] for name in deduped}
 
-    static_args_set = set(normalized["static_args"])
-    active_train = "-SkipPretrain" not in static_args_set
-    active_finetune = "-SkipFinetune" not in static_args_set
+    static_args_lower = {str(arg).strip().lower() for arg in normalized["static_args"]}
+    active_train = ("-skippretrain" not in static_args_lower) and ("--skip-pretrain" not in static_args_lower)
+    active_finetune = ("-skipfinetune" not in static_args_lower) and ("--skip-finetune" not in static_args_lower)
     if not active_train and not active_finetune:
         raise ValueError("Invalid static args: both pretrain and finetune are skipped")
     normalized["active_stages"] = {
@@ -235,9 +237,41 @@ def extract_metric(metric_cfg: dict[str, Any], output_root: Path) -> float:
 
 
 def run_trial_command(command: list[str], cwd: Path) -> None:
+    exe = str(command[0]).strip() if command else ""
+    if exe and shutil.which(exe) is None:
+        if exe.lower() == "powershell" and os.name != "nt":
+            raise RuntimeError(
+                "Trial command requires 'powershell' but it is not available on this platform. "
+                "On Linux/macOS use configs/optuna_*_linux.yaml."
+            )
+        if exe.lower() == "bash" and os.name == "nt":
+            raise RuntimeError(
+                "Trial command requires 'bash' but it is not available on this platform. "
+                "On Windows use configs/optuna_ds*.yaml (non-linux variants)."
+            )
     completed = subprocess.run(command, cwd=str(cwd), check=False)
     if completed.returncode != 0:
         raise RuntimeError(f"Trial command failed with exit code {completed.returncode}")
+
+
+def with_forwarded_python(command: list[str]) -> list[str]:
+    """Forward current interpreter to wrapper scripts to avoid env drift across shells."""
+    if not command:
+        return command
+    normalized_tokens = [str(token).replace("\\", "/").lower() for token in command]
+    if not any("run_optuna_pretrain_and_finetune" in token for token in normalized_tokens):
+        return command
+
+    command_lower = [str(token).strip().lower() for token in normalized_tokens]
+    if "-pythonexe" in command_lower or "--python-exe" in command_lower:
+        return command
+
+    injected = list(command)
+    if str(command[0]).strip().lower() == "powershell":
+        injected.extend(["-PythonExe", sys.executable])
+    else:
+        injected.extend(["--python-exe", sys.executable])
+    return injected
 
 
 def main() -> None:
@@ -246,10 +280,11 @@ def main() -> None:
     study_cfg = normalize_study_config(load_yaml(study_config_path), args, study_config_path)
 
     if args.dry_run:
+        preview_command = with_forwarded_python(list(study_cfg["command"] + study_cfg["static_args"]))
         summary = {
             "study_name": study_cfg["study_name"],
             "mode": args.mode or "default",
-            "command": study_cfg["command"] + study_cfg["static_args"],
+            "command": preview_command,
             "cwd": str(study_cfg["cwd"]),
             "output_arg": study_cfg["output_arg"],
             "metric": study_cfg["metric"],
@@ -311,6 +346,8 @@ def main() -> None:
             cli_arg = str(spec.get("cli_arg", "")).strip()
             if cli_arg:
                 command.extend([cli_arg, str(value)])
+
+        command = with_forwarded_python(command)
 
         with open(trial_dir / "trial_plan.json", "w", encoding="utf-8") as handle:
             json.dump({"command": command, "sampled_values": sampled_values}, handle, ensure_ascii=False, indent=2)
