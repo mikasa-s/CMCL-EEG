@@ -311,15 +311,28 @@ class TrainConfig:
                     raise FileNotFoundError(f"Contrastive checkpoint not found: {resolved}")
             eeg_baseline_cfg = finetune_cfg.get("eeg_baseline", {}) or {}
             if bool(eeg_baseline_cfg.get("enabled", False)):
-                category = str(eeg_baseline_cfg.get("category", "foundation")).strip().lower()
                 model_name = str(eeg_baseline_cfg.get("model_name", "cbramod")).strip().lower()
                 fusion = str(finetune_cfg.get("fusion", "eeg_only")).strip().lower()
-                if category not in {"traditional", "foundation"}:
-                    raise ValueError("finetune.eeg_baseline.category must be one of: traditional, foundation")
                 valid_models = {
                         "traditional": {"svm", "eeg_deformer", "eegnet", "conformer", "tsception"},
                         "foundation": {"labram", "cbramod"},
                 }
+                inferred_category = next(
+                    (name for name, models in valid_models.items() if model_name in models),
+                    "",
+                )
+                if not inferred_category:
+                    supported_models = sorted(valid_models["traditional"] | valid_models["foundation"])
+                    raise ValueError(
+                        f"Unsupported finetune.eeg_baseline.model_name='{model_name}'. "
+                        f"Supported values: {supported_models}"
+                    )
+                raw_category = str(eeg_baseline_cfg.get("category", "")).strip().lower()
+                if raw_category and raw_category not in {"traditional", "foundation"}:
+                    raise ValueError("finetune.eeg_baseline.category must be one of: traditional, foundation")
+                category = raw_category or inferred_category
+                if category != inferred_category:
+                    category = inferred_category
                 if model_name not in valid_models[category]:
                     raise ValueError(
                         f"Unsupported finetune.eeg_baseline.model_name='{model_name}' for category='{category}'"

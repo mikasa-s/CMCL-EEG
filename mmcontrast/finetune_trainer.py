@@ -102,10 +102,10 @@ class FinetuneTrainer:
             )
             print(self.model.initialization_summary)
             print(f"Model params: total={total_params:,}, trainable={trainable_params:,}")
-            if frozen_params:
-                frozen_total = sum(item[1] for item in frozen_params)
-                frozen_desc = "; ".join([f"{name} ({count})" for name, count in frozen_params])
-                print(f"Non-trainable params: total={frozen_total:,}; {frozen_desc}")
+            # if frozen_params:
+            #     frozen_total = sum(item[1] for item in frozen_params)
+            #     frozen_desc = "; ".join([f"{name} ({count})" for name, count in frozen_params])
+            #     print(f"Non-trainable params: total={frozen_total:,}; {frozen_desc}")
         if is_dist_initialized():
             # 只有真正进入分布式模式时才包装 DDP。
             self.model = DDP(

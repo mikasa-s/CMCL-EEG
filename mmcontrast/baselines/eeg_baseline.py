@@ -250,7 +250,9 @@ class EEGNet(nn.Module):
         x = self.block1(x)
         x = self.block2(x)
         x = self.lastLayer(x)
-        return x.view(x.size(0), self.num_classes)
+        if x.ndim > 2:
+            x = x.mean(dim=tuple(range(2, x.ndim)))
+        return x.reshape(x.size(0), self.num_classes)
 # ============================================================================
 # Conformer 模型定义（官方实现）
 # 来源：EEG-Conformer-main/conformer.py
