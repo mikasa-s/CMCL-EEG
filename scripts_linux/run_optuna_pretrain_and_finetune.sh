@@ -18,6 +18,8 @@ FINETUNE_BATCH_SIZE="0"
 BATCH_SIZE="0"
 EVAL_BATCH_SIZE="0"
 NUM_WORKERS="-1"
+GPU_COUNT="1"
+GPU_IDS=""
 SKIP_PRETRAIN="false"
 SKIP_FINETUNE="false"
 TEST_ONLY="false"
@@ -50,6 +52,8 @@ while [[ $# -gt 0 ]]; do
         --batch-size) BATCH_SIZE="$2"; shift 2 ;;
         --eval-batch-size) EVAL_BATCH_SIZE="$2"; shift 2 ;;
         --num-workers) NUM_WORKERS="$2"; shift 2 ;;
+        --gpu-count) GPU_COUNT="$2"; shift 2 ;;
+        --gpu-ids) GPU_IDS="$2"; shift 2 ;;
         --skip-pretrain) SKIP_PRETRAIN="true"; shift ;;
         --skip-finetune) SKIP_FINETUNE="true"; shift ;;
         --test-only) TEST_ONLY="true"; shift ;;
@@ -111,6 +115,8 @@ if [[ ${PRETRAIN_BATCH_SIZE} -gt 0 ]]; then args+=("--pretrain-batch-size" "${PR
 if [[ ${FINETUNE_BATCH_SIZE} -gt 0 ]]; then args+=("--finetune-batch-size" "${FINETUNE_BATCH_SIZE}"); fi
 if [[ ${EVAL_BATCH_SIZE} -gt 0 ]]; then args+=("--eval-batch-size" "${EVAL_BATCH_SIZE}"); fi
 if [[ ${NUM_WORKERS} -ge 0 ]]; then args+=("--num-workers" "${NUM_WORKERS}"); fi
+if [[ ${GPU_COUNT} -gt 0 ]]; then args+=("--gpu-count" "${GPU_COUNT}"); fi
+if [[ -n "${GPU_IDS}" ]]; then args+=("--gpu-ids" "${GPU_IDS}"); fi
 if [[ "${SKIP_PRETRAIN}" == "true" ]]; then args+=("--skip-pretrain"); fi
 if [[ "${SKIP_FINETUNE}" == "true" ]]; then args+=("--skip-finetune"); fi
 if [[ "${TEST_ONLY}" == "true" ]]; then args+=("--test-only"); fi

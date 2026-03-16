@@ -23,6 +23,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--timeout", type=int, default=None, help="Override study.timeout in seconds.")
     parser.add_argument("--study-name", type=str, default="", help="Override study.name from YAML.")
     parser.add_argument("--output-dir", type=str, default="", help="Override study.output_dir from YAML.")
+    parser.add_argument("--gpu-count", type=int, default=1, help="Number of GPUs used inside each trial (DDP). Trials remain sequential.")
+    parser.add_argument("--gpu-ids", type=str, default="", help="Optional comma-separated physical GPU IDs for each trial, e.g. 0,1.")
     parser.add_argument("--fail-fast", action="store_true", help="Stop immediately when a trial command fails.")
     parser.add_argument("--dry-run", action="store_true", help="Validate study config wiring and print resolved command/runtime paths without launching trials.")
     return parser.parse_args()
@@ -274,6 +276,34 @@ def with_forwarded_python(command: list[str]) -> list[str]:
     return injected
 
 
+def with_trial_gpu_settings(command: list[str], args: argparse.Namespace) -> list[str]:
+    """Inject trial-level GPU settings into Optuna wrapper commands."""
+    if not command:
+        return command
+    if args.gpu_count <= 0:
+        raise ValueError("--gpu-count must be >= 1")
+
+    normalized_tokens = [str(token).replace("\\", "/").lower() for token in command]
+    if not any("run_optuna_pretrain_and_finetune" in token for token in normalized_tokens):
+        return command
+
+    lowered = [str(token).strip().lower() for token in command]
+    is_powershell = str(command[0]).strip().lower() == "powershell"
+
+    injected = list(command)
+    if is_powershell:
+        if "-gpucount" not in lowered:
+            injected.extend(["-GpuCount", str(args.gpu_count)])
+        if args.gpu_ids.strip() and "-gpuids" not in lowered:
+            injected.extend(["-GpuIds", args.gpu_ids.strip()])
+    else:
+        if "--gpu-count" not in lowered:
+            injected.extend(["--gpu-count", str(args.gpu_count)])
+        if args.gpu_ids.strip() and "--gpu-ids" not in lowered:
+            injected.extend(["--gpu-ids", args.gpu_ids.strip()])
+    return injected
+
+
 def main() -> None:
     args = parse_args()
     study_config_path = resolve_path(args.study_config, base_dir=PROJECT_ROOT)
@@ -281,6 +311,7 @@ def main() -> None:
 
     if args.dry_run:
         preview_command = with_forwarded_python(list(study_cfg["command"] + study_cfg["static_args"]))
+        preview_command = with_trial_gpu_settings(preview_command, args)
         summary = {
             "study_name": study_cfg["study_name"],
             "mode": args.mode or "default",
@@ -294,6 +325,11 @@ def main() -> None:
             },
             "active_stages": study_cfg.get("active_stages", {}),
             "parameter_names": sorted(study_cfg["parameters"].keys()),
+            "trial_gpu": {
+                "gpu_count": args.gpu_count,
+                "gpu_ids": args.gpu_ids.strip(),
+                "trial_parallelism": "sequential",
+            },
         }
         print(json.dumps(summary, ensure_ascii=False, indent=2))
         return
@@ -348,6 +384,7 @@ def main() -> None:
                 command.extend([cli_arg, str(value)])
 
         command = with_forwarded_python(command)
+        command = with_trial_gpu_settings(command, args)
 
         with open(trial_dir / "trial_plan.json", "w", encoding="utf-8") as handle:
             json.dump({"command": command, "sampled_values": sampled_values}, handle, ensure_ascii=False, indent=2)

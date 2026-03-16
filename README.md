@@ -344,6 +344,23 @@ ds002739：
 - data.manifest_csv 指向 joint manifest_all.csv。
 - 预训练阶段不再使用 val_manifest_csv 或 test_manifest_csv。
 - contrastive 训练不再执行验证逻辑，checkpoint 仅按 train loss 选择。
+- EEG/fMRI 编码器是否加载已有权重由 `eeg_model.checkpoint_path` 与 `fmri_model.checkpoint_path` 控制。
+  - 为空字符串：随机初始化。
+  - 非空：在构建模型时加载对应 checkpoint（路径相对项目根目录解析）。
+
+代码入口（联合预训练读取权重的位置）：
+
+- [mmcontrast/contrastive_trainer.py](mmcontrast/contrastive_trainer.py)：`build_model()` 会把 `eeg_model.checkpoint_path`/`fmri_model.checkpoint_path` 传入编码器。
+- [mmcontrast/models/eeg_adapter.py](mmcontrast/models/eeg_adapter.py)：`EEGCBraModAdapter` 在 `checkpoint_path` 非空时加载权重。
+- [mmcontrast/models/fmri_adapter.py](mmcontrast/models/fmri_adapter.py)：`FMRINeuroSTORMAdapter` 在 `checkpoint_path` 非空时加载权重。
+
+实操示例（让联合预训练先加载 EEG+fMRI 预训练权重）：
+
+```powershell
+python .\run_train.py --config configs\train_joint_contrastive.yaml `
+  --set eeg_model.checkpoint_path='pretrained_weights/CBraMod_pretrained_weights.pth' `
+  --set fmri_model.checkpoint_path='pretrained_weights/pt_neurostorm_mae_ratio0.5.ckpt'
+```
 
 ### 单数据集微调
 
@@ -371,6 +388,44 @@ ds002739：
 - `labram_checkpoint_path: pretrained_weights/labram-base.pth`
 
 注意：当前 LaBraM baseline 需要输入 EEG 通道数为 62。
+
+### 新增 Baseline 的改动清单
+
+如果你要增加一个新的 baseline（把 LaBraM 当作 baseline 就属于这类场景），建议按下面的分层改：
+
+1. 模型定义放哪里
+- 通用骨干定义：放在 [mmcontrast/backbones](mmcontrast/backbones) 下，建议按模态建子目录（例如 `eeg_xxx`）。
+- 训练侧适配器（统一输入输出、加载 checkpoint）：放在 [mmcontrast/models](mmcontrast/models)（例如 [mmcontrast/models/eeg_labram_adapter.py](mmcontrast/models/eeg_labram_adapter.py)）。
+- baseline 路由与策略（traditional/foundation、是否加载预训练）：放在 [mmcontrast/baselines/eeg_baseline.py](mmcontrast/baselines/eeg_baseline.py)。
+
+2. 配置校验必须同步
+- 在 [mmcontrast/config.py](mmcontrast/config.py) 的 baseline 白名单里注册 `model_name`，否则配置会在训练前被拦截。
+- 如果 baseline 需要专用 checkpoint（如 LaBraM），在这里补充路径存在性校验。
+
+3. 配置文件与入口参数
+- 在 [configs/finetune_ds002336.yaml](configs/finetune_ds002336.yaml)、[configs/finetune_ds002338.yaml](configs/finetune_ds002338.yaml)、[configs/finetune_ds002739.yaml](configs/finetune_ds002739.yaml) 增加/同步 baseline 字段默认值。
+- 如果需要命令行覆盖项，补充 [run_finetune.py](run_finetune.py) 的参数映射。
+
+4. 最低验证
+- 先跑 `python -m py_compile` 做语法校验。
+- 再用单 fold 小 epoch（或 `optuna --dry-run`）验证配置链路确实命中你的 baseline。
+
+### 微调阶段如何控制是否读取预训练权重
+
+代码入口（微调读取权重的位置）：
+
+- [mmcontrast/finetune_trainer.py](mmcontrast/finetune_trainer.py)：初始化时解析并写入 `finetune.contrastive_checkpoint_path`。
+- [mmcontrast/models/classifier.py](mmcontrast/models/classifier.py)：
+  - `finetune.contrastive_checkpoint_path` 非空时，加载整套对比学习 backbone（EEG+fMRI）参数。
+  - 若为空但 `eeg_model.checkpoint_path`/`fmri_model.checkpoint_path` 有值，则分别走模态级 checkpoint。
+- [mmcontrast/baselines/eeg_baseline.py](mmcontrast/baselines/eeg_baseline.py)：`finetune.eeg_baseline.load_pretrained_weights` 控制 baseline 是否加载预训练权重（含 LaBraM）。
+
+控制方式：
+
+- 默认主流程 [scripts/run_pretrain_and_finetune.ps1](scripts/run_pretrain_and_finetune.ps1) 会把联合预训练 best checkpoint 同步到 `pretrained_weights/contrastive_best.pth`，并在微调时自动传给 `--contrastive-checkpoint`。
+- 禁用“加载对比学习权重”：把 `finetune.contrastive_checkpoint_path` 置空（或不要传 `--contrastive-checkpoint`）。
+- 使用 EEG baseline 且禁用其预训练加载：设置 `finetune.eeg_baseline.load_pretrained_weights: false`。
+- 使用 LaBraM baseline：设置 `model_name: labram`，并将 `labram_checkpoint_path` 指向 `pretrained_weights/labram-base.pth`。
 
 ## Optuna
 
@@ -480,6 +535,38 @@ Linux 示例：
 python ./run_optuna_search.py --study-config configs/optuna_ds002338_linux.yaml --mode full
 python ./run_optuna_search.py --study-config configs/optuna_ds002338_linux.yaml --mode pretrain_only
 ```
+
+### Optuna 每个 trial 使用多 GPU（trial 串行）
+
+当前 `run_optuna_search.py` 采用串行 trial（不会并发启动多个 trial）。
+
+- 也就是说：一次只跑一个 trial。
+- 当你设置 `--gpu-count > 1` 时，是“当前 trial 内部”用 DDP 多卡训练。
+- 适用于 full / finetune_only / pretrain_only 三种 mode。
+
+Windows 示例（每个 trial 使用 2 张卡）：
+
+```powershell
+python .\run_optuna_search.py --study-config configs\optuna_ds002336.yaml --mode full --gpu-count 2
+```
+
+Windows 指定物理卡（例如仅用 0,1）：
+
+```powershell
+python .\run_optuna_search.py --study-config configs\optuna_ds002336.yaml --mode finetune_only --gpu-count 2 --gpu-ids 0,1
+```
+
+Linux 示例：
+
+```bash
+python ./run_optuna_search.py --study-config configs/optuna_ds002338_linux.yaml --mode full --gpu-count 2 --gpu-ids 0,1
+```
+
+实现方式：
+
+- Optuna wrapper 会把 `gpu-count/gpu-ids` 透传到主流程脚本。
+- 主流程在每个 trial 内使用 `python -m torch.distributed.run --nproc_per_node=<gpu_count>` 启动 `run_train.py` / `run_finetune.py`。
+- 当 `--gpu-count=1` 或启用 `--force-cpu` 时，自动回退为单进程运行。
 
 ### 多 GPU 联合预训练示例
 

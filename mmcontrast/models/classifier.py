@@ -50,7 +50,7 @@ class EEGfMRIClassifier(nn.Module):
             # 复用对比学习阶段的双塔骨干作为下游特征提取器。
             self.backbone = EEGfMRIContrastiveModel(cfg)
             if checkpoint_path:
-                checkpoint = torch.load(checkpoint_path, map_location="cpu")
+                torch.load(checkpoint_path, map_location="cpu", weights_only=False)
                 state = checkpoint.get("model", checkpoint)
                 current_state = self.backbone.state_dict()
                 compatible_state = {}

@@ -26,6 +26,8 @@ param(
     [int]$BatchSize = 0,
     [int]$EvalBatchSize = 0,
     [int]$NumWorkers = -1,
+    [int]$GpuCount = 1,
+    [string]$GpuIds = "",
     [switch]$SkipPretrain,
     [switch]$SkipFinetune,
     [switch]$TestOnly,
@@ -212,6 +214,20 @@ if ($SkipPretrain -and $SkipFinetune) {
 if ($TestOnly -and $SkipFinetune) {
     throw "TestOnly requires the finetune stage and cannot be combined with SkipFinetune"
 }
+if ($GpuCount -le 0) {
+    throw "GpuCount must be >= 1"
+}
+
+$gpuIdList = @($GpuIds.Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+if ($gpuIdList.Count -gt 0 -and $gpuIdList.Count -lt $GpuCount) {
+    throw "GpuIds count ($($gpuIdList.Count)) must be >= GpuCount ($GpuCount)"
+}
+if ($gpuIdList.Count -gt 0) {
+    $env:CUDA_VISIBLE_DEVICES = ($gpuIdList -join ',')
+    Write-Host ("Using CUDA_VISIBLE_DEVICES=" + $env:CUDA_VISIBLE_DEVICES)
+}
+
+$useMultiGpu = (-not $ForceCpu) -and ($GpuCount -gt 1)
 
 if ($PretrainBatchSize -le 0 -and $BatchSize -gt 0) {
     $PretrainBatchSize = $BatchSize
@@ -260,14 +276,13 @@ if (!$SkipPretrain) {
         Invoke-CommandOrThrow -Executable "powershell" -Args $jointPrepareArgs -StepName "joint preprocessing"
     }
 
+    $trainScript = (Join-Path $repoRoot "run_train.py")
     $trainArgs = @(
-        "run_train.py",
         "--config", $JointTrainConfig,
         "--manifest", $jointManifestPath,
         "--root-dir", $JointCacheRoot,
         "--output-dir", (Join-Path $JointOutputRoot "contrastive")
     )
-    $trainArgs[0] = (Join-Path $repoRoot "run_train.py")
     if ($PretrainEpochs -gt 0) {
         $trainArgs += @("--epochs", $PretrainEpochs.ToString())
     }
@@ -280,9 +295,21 @@ if (!$SkipPretrain) {
     if ($ForceCpu) {
         $trainArgs += "--force-cpu"
     }
+    elseif ($GpuCount -gt 0) {
+        $trainArgs += @("--set", "train.gpu_count=$GpuCount")
+        if ($gpuIdList.Count -gt 0) {
+            $trainArgs += @("--set", "train.gpu_ids=$($gpuIdList -join ',')")
+        }
+    }
 
     Write-Host "Running joint contrastive pretraining..."
-    Invoke-CommandOrThrow -Executable $python -Args $trainArgs -StepName "joint pretraining"
+    if ($useMultiGpu) {
+        $ddpTrainArgs = @("-m", "torch.distributed.run", "--nproc_per_node", $GpuCount.ToString(), $trainScript) + $trainArgs
+        Invoke-CommandOrThrow -Executable $python -Args $ddpTrainArgs -StepName "joint pretraining"
+    }
+    else {
+        Invoke-CommandOrThrow -Executable $python -Args (@($trainScript) + $trainArgs) -StepName "joint pretraining"
+    }
 
     if (!(Test-Path $jointTrainingCheckpointPath)) {
         throw "Pretrain checkpoint not found after pretraining: $jointTrainingCheckpointPath"
@@ -375,8 +402,8 @@ foreach ($foldDir in $foldDirs) {
         throw "Missing LOSO manifest(s) under $($foldDir.FullName)"
     }
 
+    $finetuneScript = (Join-Path $repoRoot "run_finetune.py")
     $finetuneArgs = @(
-        (Join-Path $repoRoot "run_finetune.py"),
         "--config", $targetFinetuneConfig,
         "--train-manifest", $trainManifest,
         "--val-manifest", $valManifest,
@@ -408,9 +435,21 @@ foreach ($foldDir in $foldDirs) {
     if ($ForceCpu) {
         $finetuneArgs += "--force-cpu"
     }
+    elseif ($GpuCount -gt 0) {
+        $finetuneArgs += @("--set", "train.gpu_count=$GpuCount")
+        if ($gpuIdList.Count -gt 0) {
+            $finetuneArgs += @("--set", "train.gpu_ids=$($gpuIdList -join ',')")
+        }
+    }
 
     Write-Host ("[" + $foldNameMap[$foldName] + "] finetune")
-    Invoke-CommandOrThrow -Executable $python -Args $finetuneArgs -StepName ("finetune " + $foldName)
+    if ($useMultiGpu) {
+        $ddpFinetuneArgs = @("-m", "torch.distributed.run", "--nproc_per_node", $GpuCount.ToString(), $finetuneScript) + $finetuneArgs
+        Invoke-CommandOrThrow -Executable $python -Args $ddpFinetuneArgs -StepName ("finetune " + $foldName)
+    }
+    else {
+        Invoke-CommandOrThrow -Executable $python -Args (@($finetuneScript) + $finetuneArgs) -StepName ("finetune " + $foldName)
+    }
     $foldElapsedSeconds = ((Get-Date) - $foldStartTime).TotalSeconds
     Write-Host ("[" + $foldNameMap[$foldName] + "] fold_elapsed=" + ([math]::Round($foldElapsedSeconds, 1)) + "s")
 }

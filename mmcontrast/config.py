@@ -318,7 +318,15 @@ class TrainConfig:
                     raise ValueError("finetune.eeg_baseline.category must be one of: traditional, foundation")
                 valid_models = {
                     "traditional": {"conv1d", "cnn", "shallowconv1d", "lstm", "bilstm"},
-                    "foundation": {"cbramod", "patch_mlp", "mlp"},
+                    "foundation": {
+                        "cbramod",
+                        "patch_mlp",
+                        "mlp",
+                        "labram",
+                        "labram_base_patch200_200",
+                        "labram_large_patch200_200",
+                        "labram_huge_patch200_200",
+                    },
                 }
                 if model_name not in valid_models[category]:
                     raise ValueError(
@@ -326,6 +334,13 @@ class TrainConfig:
                     )
                 if category == "traditional" and fusion != "eeg_only":
                     raise ValueError("Traditional EEG baselines only support finetune.fusion=eeg_only")
+                if category == "foundation" and model_name.startswith("labram"):
+                    load_pretrained = bool(eeg_baseline_cfg.get("load_pretrained_weights", True))
+                    checkpoint_path = str(eeg_baseline_cfg.get("labram_checkpoint_path", "")).strip()
+                    if load_pretrained and checkpoint_path:
+                        resolved = root / checkpoint_path
+                        if not resolved.exists():
+                            raise FileNotFoundError(f"LaBraM checkpoint not found: {resolved}")
 
 
         _validate_manifest_shapes(manifest_path=manifest_path, root_dir=root_dir, eeg_cfg=eeg_cfg, fmri_cfg=fmri_cfg, data_cfg=data_cfg)

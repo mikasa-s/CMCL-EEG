@@ -30,6 +30,8 @@ FINETUNE_BATCH_SIZE="0"
 BATCH_SIZE="0"
 EVAL_BATCH_SIZE="0"
 NUM_WORKERS="-1"
+GPU_COUNT="1"
+GPU_IDS=""
 SKIP_PRETRAIN="false"
 SKIP_FINETUNE="false"
 TEST_ONLY="false"
@@ -74,6 +76,8 @@ while [[ $# -gt 0 ]]; do
         --batch-size) BATCH_SIZE="$2"; shift 2 ;;
         --eval-batch-size) EVAL_BATCH_SIZE="$2"; shift 2 ;;
         --num-workers) NUM_WORKERS="$2"; shift 2 ;;
+        --gpu-count) GPU_COUNT="$2"; shift 2 ;;
+        --gpu-ids) GPU_IDS="$2"; shift 2 ;;
         --skip-pretrain) SKIP_PRETRAIN="true"; shift ;;
         --skip-finetune) SKIP_FINETUNE="true"; shift ;;
         --test-only) TEST_ONLY="true"; shift ;;
@@ -193,6 +197,32 @@ if [[ "${SKIP_PRETRAIN}" == "true" && "${SKIP_FINETUNE}" == "true" ]]; then
     echo "--skip-pretrain and --skip-finetune cannot both be set" >&2
     exit 2
 fi
+if [[ ${GPU_COUNT} -le 0 ]]; then
+    echo "--gpu-count must be >= 1" >&2
+    exit 2
+fi
+
+IFS=',' read -r -a GPU_ID_LIST <<< "${GPU_IDS}"
+NONEMPTY_GPU_IDS=()
+for item in "${GPU_ID_LIST[@]}"; do
+    trimmed="$(echo "${item}" | xargs)"
+    if [[ -n "${trimmed}" ]]; then
+        NONEMPTY_GPU_IDS+=("${trimmed}")
+    fi
+done
+if [[ ${#NONEMPTY_GPU_IDS[@]} -gt 0 && ${#NONEMPTY_GPU_IDS[@]} -lt ${GPU_COUNT} ]]; then
+    echo "--gpu-ids count (${#NONEMPTY_GPU_IDS[@]}) must be >= --gpu-count (${GPU_COUNT})" >&2
+    exit 2
+fi
+if [[ ${#NONEMPTY_GPU_IDS[@]} -gt 0 ]]; then
+    export CUDA_VISIBLE_DEVICES="$(IFS=,; echo "${NONEMPTY_GPU_IDS[*]}")"
+    echo "Using CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}"
+fi
+
+USE_MULTI_GPU="false"
+if [[ "${FORCE_CPU}" != "true" && ${GPU_COUNT} -gt 1 ]]; then
+    USE_MULTI_GPU="true"
+fi
 
 if [[ ${PRETRAIN_BATCH_SIZE} -le 0 && ${BATCH_SIZE} -gt 0 ]]; then PRETRAIN_BATCH_SIZE="${BATCH_SIZE}"; fi
 if [[ ${FINETUNE_BATCH_SIZE} -le 0 && ${BATCH_SIZE} -gt 0 ]]; then FINETUNE_BATCH_SIZE="${BATCH_SIZE}"; fi
@@ -269,7 +299,6 @@ if [[ "${SKIP_PRETRAIN}" != "true" ]]; then
     fi
 
     train_args=(
-        "${REPO_ROOT}/run_train.py"
         "--config" "${JOINT_TRAIN_CONFIG}"
         "--manifest" "${joint_manifest_path}"
         "--root-dir" "${JOINT_CACHE_ROOT}"
@@ -279,9 +308,19 @@ if [[ "${SKIP_PRETRAIN}" != "true" ]]; then
     if [[ ${PRETRAIN_BATCH_SIZE} -gt 0 ]]; then train_args+=("--batch-size" "${PRETRAIN_BATCH_SIZE}"); fi
     if [[ ${NUM_WORKERS} -ge 0 ]]; then train_args+=("--num-workers" "${NUM_WORKERS}"); fi
     if [[ "${FORCE_CPU}" == "true" ]]; then train_args+=("--force-cpu"); fi
+    if [[ "${FORCE_CPU}" != "true" ]]; then
+        train_args+=("--set" "train.gpu_count=${GPU_COUNT}")
+        if [[ ${#NONEMPTY_GPU_IDS[@]} -gt 0 ]]; then
+            train_args+=("--set" "train.gpu_ids=$(IFS=,; echo "${NONEMPTY_GPU_IDS[*]}")")
+        fi
+    fi
 
     echo "Running joint contrastive pretraining..."
-    invoke_or_throw "joint pretraining" "${PYTHON}" "${train_args[@]}"
+    if [[ "${USE_MULTI_GPU}" == "true" ]]; then
+        invoke_or_throw "joint pretraining" "${PYTHON}" -m torch.distributed.run --nproc_per_node "${GPU_COUNT}" "${REPO_ROOT}/run_train.py" "${train_args[@]}"
+    else
+        invoke_or_throw "joint pretraining" "${PYTHON}" "${REPO_ROOT}/run_train.py" "${train_args[@]}"
+    fi
 
     if [[ ! -f "${joint_training_checkpoint_path}" ]]; then
         echo "Pretrain checkpoint not found after pretraining: ${joint_training_checkpoint_path}" >&2
@@ -382,7 +421,6 @@ for fold_dir in "${fold_dirs[@]}"; do
     fi
 
     finetune_args=(
-        "${REPO_ROOT}/run_finetune.py"
         "--config" "${target_finetune_config}"
         "--train-manifest" "${train_manifest}"
         "--val-manifest" "${val_manifest}"
@@ -405,9 +443,19 @@ for fold_dir in "${fold_dirs[@]}"; do
     if [[ ${EVAL_BATCH_SIZE} -gt 0 ]]; then finetune_args+=("--eval-batch-size" "${EVAL_BATCH_SIZE}"); fi
     if [[ ${NUM_WORKERS} -ge 0 ]]; then finetune_args+=("--num-workers" "${NUM_WORKERS}"); fi
     if [[ "${FORCE_CPU}" == "true" ]]; then finetune_args+=("--force-cpu"); fi
+    if [[ "${FORCE_CPU}" != "true" ]]; then
+        finetune_args+=("--set" "train.gpu_count=${GPU_COUNT}")
+        if [[ ${#NONEMPTY_GPU_IDS[@]} -gt 0 ]]; then
+            finetune_args+=("--set" "train.gpu_ids=$(IFS=,; echo "${NONEMPTY_GPU_IDS[*]}")")
+        fi
+    fi
 
     echo "[${fold_name}] finetune"
-    invoke_or_throw "finetune ${fold_name}" "${PYTHON}" "${finetune_args[@]}"
+    if [[ "${USE_MULTI_GPU}" == "true" ]]; then
+        invoke_or_throw "finetune ${fold_name}" "${PYTHON}" -m torch.distributed.run --nproc_per_node "${GPU_COUNT}" "${REPO_ROOT}/run_finetune.py" "${finetune_args[@]}"
+    else
+        invoke_or_throw "finetune ${fold_name}" "${PYTHON}" "${REPO_ROOT}/run_finetune.py" "${finetune_args[@]}"
+    fi
     fold_end_seconds="$(date +%s)"
     echo "[${fold_name}] fold_elapsed=$((fold_end_seconds - fold_start_seconds))s"
 done

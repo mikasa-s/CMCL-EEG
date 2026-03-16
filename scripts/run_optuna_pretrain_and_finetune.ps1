@@ -14,6 +14,8 @@ param(
     [int]$BatchSize = 0,
     [int]$EvalBatchSize = 0,
     [int]$NumWorkers = -1,
+    [int]$GpuCount = 1,
+    [string]$GpuIds = "",
     [switch]$SkipPretrain,
     [switch]$SkipFinetune,
     [switch]$TestOnly,
@@ -94,6 +96,12 @@ if ($EvalBatchSize -gt 0) {
 }
 if ($NumWorkers -ge 0) {
     $cliParams += @( "-NumWorkers", $NumWorkers.ToString() )
+}
+if ($GpuCount -gt 0) {
+    $cliParams += @( "-GpuCount", $GpuCount.ToString() )
+}
+if ($GpuIds.Trim()) {
+    $cliParams += @( "-GpuIds", $GpuIds )
 }
 if ($SkipPretrain) {
     $cliParams += "-SkipPretrain"
