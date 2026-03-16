@@ -14,14 +14,15 @@ data:
   root_dir: cache/ds002338
   preload_dataset: true
   eeg_channel_subset: auto
-  expected_eeg_shape: [63, 8, 200]
-  expected_fmri_shape: [48, 48, 48, 10]
+  eeg_channel_target_manifest: cache/joint_contrastive/eeg_channels_target.csv
+  expected_eeg_shape: [40, 8, 200]
+  expected_fmri_shape: [48, 48, 48, 1]
   normalize_eeg: true
   normalize_fmri: true
   eeg_scale: 1.0
   fmri_scale: 1.0
   fmri_input_type: volume
-  fmri_target_shape: [48, 48, 48, 10]
+  fmri_target_shape: [48, 48, 48, 1]
   fmri_spatial_strategy: pad_or_crop
   fmri_temporal_strategy: pad_or_crop
   fmri_pad_value: 0.0
@@ -41,7 +42,7 @@ eeg_model:
 fmri_model:
   backbone: neurostorm
   checkpoint_path: ""
-  img_size: [48, 48, 48, 10]
+  img_size: [48, 48, 48, 1]
   in_chans: 1
   embed_dim: 24
   first_window_size: [2, 2, 2, 2]
@@ -64,7 +65,7 @@ finetune:
     enabled: false
     model_name: cbramod
     num_classes: 2
-    num_channels: 62
+    num_channels: 40
     num_timepoints: 200
     load_pretrained_weights: false
     checkpoint_path: ""

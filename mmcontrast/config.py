@@ -292,13 +292,18 @@ class TrainConfig:
 
         if "finetune" in self.raw:
             finetune_cfg = self.section("finetune")
-            for split_key in ["train_manifest_csv", "val_manifest_csv", "test_manifest_csv"]:
-                split_value = data_cfg.get(split_key, "")
-                split_path = "" if split_value is None else str(split_value).strip()
-                if split_path:
-                    resolved = root / split_path
-                    if not resolved.exists():
-                        raise FileNotFoundError(f"Manifest CSV not found: {resolved}")
+        for split_key in ["train_manifest_csv", "val_manifest_csv", "test_manifest_csv"]:
+            split_value = data_cfg.get(split_key, "")
+            split_path = "" if split_value is None else str(split_value).strip()
+            if split_path:
+                resolved = root / split_path
+                if not resolved.exists():
+                    raise FileNotFoundError(f"Manifest CSV not found: {resolved}")
+        eeg_channel_target_manifest = str(data_cfg.get("eeg_channel_target_manifest", "")).strip()
+        if eeg_channel_target_manifest:
+            resolved = root / eeg_channel_target_manifest
+            if not resolved.exists():
+                raise FileNotFoundError(f"EEG channel target manifest not found: {resolved}")
             if "num_classes" not in finetune_cfg:
                 raise ValueError("Missing finetune.num_classes in config")
             selection_metric = str(finetune_cfg.get("selection_metric", "accuracy")).strip().lower()

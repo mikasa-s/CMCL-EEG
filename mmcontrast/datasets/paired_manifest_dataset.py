@@ -74,6 +74,42 @@ class PairedEEGfMRIDataset(Dataset):
         indices = ordered["source_channel_index"].dropna().astype(int).tolist()
         return indices or None
 
+    @staticmethod
+    def _normalize_channel_name(name: Any) -> str:
+        return str(name).strip().upper().replace(" ", "")
+
+    @classmethod
+    def _load_target_channel_names(cls, manifest_path: Path) -> list[str]:
+        target_df = pd.read_csv(manifest_path)
+        if "target_channel_name" not in target_df.columns:
+            raise ValueError(f"Target channel manifest missing 'target_channel_name': {manifest_path}")
+        ordered = target_df.sort_values(by="target_channel_index", kind="stable") if "target_channel_index" in target_df.columns else target_df
+        names = [cls._normalize_channel_name(value) for value in ordered["target_channel_name"].tolist()]
+        return [name for name in names if name]
+
+    @classmethod
+    def _resolve_named_eeg_channel_indices(cls, root_dir: str, target_manifest: str) -> list[int] | None:
+        if not root_dir or not target_manifest:
+            return None
+        current_manifest_path = Path(root_dir) / "eeg_channels_target.csv"
+        desired_manifest_path = Path(target_manifest)
+        if not current_manifest_path.exists() or not desired_manifest_path.exists():
+            return None
+
+        current_names = cls._load_target_channel_names(current_manifest_path)
+        desired_names = cls._load_target_channel_names(desired_manifest_path)
+        if not current_names or not desired_names:
+            return None
+
+        current_index = {name: idx for idx, name in enumerate(current_names)}
+        missing = [name for name in desired_names if name not in current_index]
+        if missing:
+            raise ValueError(
+                f"Requested EEG target channels are missing from cache '{root_dir}': {missing[:8]}"
+                + (" ..." if len(missing) > 8 else "")
+            )
+        return [current_index[name] for name in desired_names]
+
     def __init__(
         self,
         manifest_csv: str,
@@ -93,12 +129,15 @@ class PairedEEGfMRIDataset(Dataset):
         subject_pack_cache_size: int = 5,
         preload_dataset: bool | str = "auto",
         eeg_channel_subset: str = "none",
+        eeg_channel_target_manifest: str = "",
     ) -> None:
         self.df = pd.read_csv(manifest_csv)
         self.training_ready = self._manifest_is_training_ready(self.df)
         resolved_channel_indices: list[int] | None = None
         if str(eeg_channel_subset).strip().lower() == "auto":
-            resolved_channel_indices = self._resolve_auto_eeg_channel_indices(root_dir)
+            resolved_channel_indices = self._resolve_named_eeg_channel_indices(root_dir, eeg_channel_target_manifest)
+            if resolved_channel_indices is None:
+                resolved_channel_indices = self._resolve_auto_eeg_channel_indices(root_dir)
         self.preparer = PairedSamplePreparer(
             root_dir=root_dir,
             normalize_eeg=False if self.training_ready else normalize_eeg,
