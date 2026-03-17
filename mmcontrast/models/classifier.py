@@ -6,10 +6,10 @@ from pathlib import Path
 
 from ..baselines import EEGBaselineModel
 from ..checkpoint_utils import extract_state_dict, filter_compatible_state_dict, load_checkpoint_file, strip_prefixes
-from .eeg_cbramod_adapter import EEGCBraModAdapter
 from .eeg_channel_summary import build_eeg_channel_summary
 from .fmri_adapter import FMRINeuroSTORMAdapter
 from .multimodal_model import EEGfMRIContrastiveModel
+from .shared_private import EEGSharedPrivateEncoder
 
 
 class EEGfMRIClassifier(nn.Module):
@@ -37,6 +37,9 @@ class EEGfMRIClassifier(nn.Module):
         eeg_channel_summary = build_eeg_channel_summary(data_cfg)
 
         self.fusion = str(finetune_cfg.get("fusion", "eeg_only"))
+        self.classifier_mode = str(finetune_cfg.get("classifier_mode", "concat")).strip().lower()
+        if self.classifier_mode not in {"shared", "private", "concat"}:
+            raise ValueError("finetune.classifier_mode must be one of: shared, private, concat")
         baseline_cfg = dict(finetune_cfg.get("eeg_baseline", {}))
         self.use_eeg_baseline = bool(baseline_cfg.get("enabled", False)) and self.fusion != "fmri_only"
         self.baseline_outputs_logits = False
@@ -117,7 +120,10 @@ class EEGfMRIClassifier(nn.Module):
             self.initialization_summary = " ".join(summary_parts)
         else:
             if self.fusion == "eeg_only":
-                self.eeg_encoder = EEGCBraModAdapter(**eeg_cfg)
+                self.eeg_encoder = EEGSharedPrivateEncoder(
+                    eeg_cfg,
+                    head_cfg={"head_dropout": float(finetune_cfg.get("head_dropout", 0.0))},
+                )
                 if checkpoint_path:
                     loaded_count = self._load_submodule_checkpoint(
                         self.eeg_encoder,
@@ -139,6 +145,7 @@ class EEGfMRIClassifier(nn.Module):
                     )
                 if eeg_channel_summary:
                     self.initialization_summary = f"{self.initialization_summary} {eeg_channel_summary}"
+                self.initialization_summary = f"{self.initialization_summary} classifier_mode={self.classifier_mode}."
             elif self.fusion == "fmri_only":
                 self.fmri_encoder = FMRINeuroSTORMAdapter(**fmri_cfg)
                 if checkpoint_path:
@@ -191,6 +198,7 @@ class EEGfMRIClassifier(nn.Module):
                     )
                 if getattr(self.backbone, "initialization_summary", ""):
                     self.initialization_summary = f"{self.initialization_summary} {self.backbone.initialization_summary}"
+                self.initialization_summary = f"{self.initialization_summary} classifier_mode={self.classifier_mode}."
 
         if bool(finetune_cfg.get("freeze_encoders", False)):
             if self.use_eeg_baseline:
@@ -216,9 +224,7 @@ class EEGfMRIClassifier(nn.Module):
 
         self.classifier = None
         if not self.baseline_outputs_logits:
-            eeg_dim = 0 if self.fusion == "fmri_only" else (
-                self.eeg_encoder.feature_dim if self.eeg_encoder is not None else self.backbone.eeg_encoder.feature_dim
-            )
+            eeg_dim = 0 if self.fusion == "fmri_only" else self._resolve_eeg_feature_dim()
             fmri_dim = 0 if self.fusion == "eeg_only" else (
                 self.fmri_encoder.feature_dim if self.fmri_encoder is not None else self.backbone.fmri_encoder.feature_dim
             )
@@ -239,6 +245,16 @@ class EEGfMRIClassifier(nn.Module):
                 nn.Linear(hidden_dim, num_classes),
             )
 
+    def _resolve_eeg_feature_dim(self) -> int:
+        encoder = self.eeg_encoder if self.eeg_encoder is not None else self.backbone.eeg_encoder
+        if hasattr(encoder, "shared_dim") and hasattr(encoder, "private_dim"):
+            if self.classifier_mode == "shared":
+                return int(getattr(encoder, "shared_dim"))
+            if self.classifier_mode == "private":
+                return int(getattr(encoder, "private_dim"))
+            return int(getattr(encoder, "shared_dim")) + int(getattr(encoder, "private_dim"))
+        return int(getattr(encoder, "feature_dim"))
+
     def forward(self, eeg: torch.Tensor | None = None, fmri: torch.Tensor | None = None) -> dict[str, torch.Tensor]:
         if self.baseline_outputs_logits:
             if eeg is None:
@@ -251,7 +267,12 @@ class EEGfMRIClassifier(nn.Module):
             }
 
         if eeg is not None:
-            eeg_feat = self.eeg_encoder(eeg) if self.eeg_encoder is not None else self.backbone.encode_eeg_feature(eeg)
+            if self.eeg_encoder is not None and hasattr(self.eeg_encoder, "encode_for_finetune"):
+                eeg_feat = self.eeg_encoder.encode_for_finetune(eeg, mode=self.classifier_mode)
+            elif self.backbone is not None:
+                eeg_feat = self.backbone.encode_eeg_feature(eeg, mode=self.classifier_mode)
+            else:
+                eeg_feat = self.eeg_encoder(eeg)
         else:
             eeg_feat = None
         if fmri is not None:

@@ -118,3 +118,15 @@ Write-Host ("EEG window sec: " + $EegWindowSec)
 if ($LASTEXITCODE -ne 0) {
     throw "joint dataset preprocessing failed with exit code $LASTEXITCODE"
 }
+
+Write-Host "Computing EEG band-power targets..."
+& $python `
+    (Join-Path $repoRoot "preprocess/compute_eeg_band_power_targets.py") `
+    "--manifest-csv" (Join-Path $OutputRoot "manifest_all.csv") `
+    "--root-dir" $OutputRoot `
+    "--sample-rate-hz" "200" `
+    "--window-sec" $EegWindowSec.ToString() `
+    "--overwrite"
+if ($LASTEXITCODE -ne 0) {
+    throw "band-power preprocessing failed with exit code $LASTEXITCODE"
+}

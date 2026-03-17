@@ -125,6 +125,7 @@ class PairedEEGfMRIDataset(Dataset):
         fmri_normalize_nonzero_only: bool = True,
         require_eeg: bool = True,
         require_fmri: bool = True,
+        require_band_power: bool = False,
         subject_pack_cache_size: int = 5,
         preload_dataset: bool | str = "auto",
         eeg_channel_subset: str = "none",
@@ -151,6 +152,7 @@ class PairedEEGfMRIDataset(Dataset):
             fmri_normalize_nonzero_only=fmri_normalize_nonzero_only,
             require_eeg=require_eeg,
             require_fmri=require_fmri,
+            require_band_power=require_band_power,
             subject_pack_cache_size=subject_pack_cache_size,
             eeg_channel_indices=resolved_channel_indices,
         )
@@ -170,6 +172,8 @@ class PairedEEGfMRIDataset(Dataset):
                 required_columns.append("eeg_path")
             if self.preparer.require_fmri:
                 required_columns.append("fmri_path")
+            if self.preparer.require_band_power:
+                required_columns.append("band_power_path")
             missing = [c for c in required_columns if c not in self.df.columns]
             if missing:
                 raise ValueError(f"Manifest missing required columns: {missing}")
@@ -212,6 +216,11 @@ class PairedEEGfMRIDataset(Dataset):
 
         if "label" in row and not pd.isna(row["label"]):
             item["label"] = int(row["label"])
+        if "band_power_path" in row and not pd.isna(row["band_power_path"]):
+            band_power_path = self.preparer.resolve_path(str(row["band_power_path"]))
+            item["band_power"] = self.preparer.prepare_band_power(self.preparer.load_array(band_power_path), band_power_path)
+        elif self.preparer.require_band_power:
+            raise ValueError("Band-power path is required for this dataset but missing in manifest row.")
         return item
 
     def _load_subject_packed_item(self, idx: int) -> dict[str, Any]:
@@ -241,6 +250,11 @@ class PairedEEGfMRIDataset(Dataset):
                 raise ValueError(f"Subject pack missing fMRI array: {pack_path}")
             item["fmri"] = self.preparer.prepare_fmri(pack["fmri"][local_idx], pack_path)
 
+        if self.preparer.require_band_power:
+            if "band_power" not in pack:
+                raise ValueError(f"Subject pack missing band_power array: {pack_path}")
+            item["band_power"] = self.preparer.prepare_band_power(pack["band_power"][local_idx], pack_path)
+
         if "labels" in pack:
             item["label"] = int(pack["labels"][local_idx])
         elif "label" in row and not pd.isna(row["label"]):
@@ -264,6 +278,8 @@ class PairedEEGfMRIDataset(Dataset):
             item["eeg"] = self.storage["eeg"][idx]
         if self.storage.get("fmri") is not None:
             item["fmri"] = self.storage["fmri"][idx]
+        if self.storage.get("band_power") is not None:
+            item["band_power"] = self.storage["band_power"][idx]
         if self.storage.get("label") is not None:
             item["label"] = self.storage["label"][idx]
         return item

@@ -13,7 +13,7 @@ from torch.utils.data import DataLoader, DistributedSampler
 
 from .datasets import PairedEEGfMRIDataset
 from .distributed import cleanup_distributed, configure_cudnn, configure_runtime_devices, gather_tensor, init_distributed, is_dist_initialized, is_main_process, runtime_summary
-from .losses import SymmetricInfoNCELoss
+from .losses import SharedPrivatePretrainLoss
 from .metrics import contrastive_retrieval_metrics
 from .models import EEGfMRIContrastiveModel
 
@@ -65,8 +65,8 @@ class ContrastiveTrainer:
                 f"pin_memory={runtime['pin_memory']}, "
                 f"cudnn_benchmark={runtime['cudnn_benchmark']}"
             )
-            # if getattr(self.model, "initialization_summary", ""):
-            #     print(self.model.initialization_summary)
+            if getattr(self.model, "initialization_summary", ""):
+                print(self.model.initialization_summary)
             print(f"Model params: total={total_params:,}, trainable={trainable_params:,}")
             # if frozen_params:
             #     frozen_total = sum(item[1] for item in frozen_params)
@@ -81,7 +81,11 @@ class ContrastiveTrainer:
                 find_unused_parameters=False,
             )
 
-        self.criterion = SymmetricInfoNCELoss(float(train_cfg.get("temperature", 0.07)))
+        self.criterion = SharedPrivatePretrainLoss(
+            temperature=float(train_cfg.get("temperature", 0.07)),
+            band_power_weight=float(train_cfg.get("band_power_loss_weight", 1.0)),
+            separation_weight=float(train_cfg.get("separation_loss_weight", 0.1)),
+        )
         self.optimizer = torch.optim.AdamW(
             self.model.parameters(),
             lr=float(train_cfg.get("lr", 1e-4)),
@@ -161,6 +165,7 @@ class ContrastiveTrainer:
         dataset_cfg.pop("test_manifest_csv", None)
         dataset_cfg.pop("expected_eeg_shape", None)
         dataset_cfg.pop("expected_fmri_shape", None)
+        dataset_cfg["require_band_power"] = True
         return PairedEEGfMRIDataset(**dataset_cfg)
 
     def build_loader(self, dataset, batch_size: int, sampler=None, shuffle=False, drop_last=False, num_workers=4, pin_memory=True):
@@ -236,17 +241,23 @@ class ContrastiveTrainer:
         with open(self.output_dir / name, "w", encoding="utf-8") as handle:
             json.dump(metrics, handle, ensure_ascii=False, indent=2)
 
-    def train_one_epoch(self, epoch: int) -> float:
+    def train_one_epoch(self, epoch: int) -> dict[str, float]:
         """执行一个 epoch 的对比学习训练。"""
         if self.sampler is not None:
             self.sampler.set_epoch(epoch)
 
         self.model.train()
-        running = 0.0
+        running = {
+            "loss": 0.0,
+            "contrastive_loss": 0.0,
+            "band_power_loss": 0.0,
+            "separation_loss": 0.0,
+        }
 
         for step, batch in enumerate(self.train_loader, start=1):
             eeg = batch["eeg"].to(self.device, non_blocking=True)
             fmri = batch["fmri"].to(self.device, non_blocking=True)
+            band_power = batch["band_power"].to(self.device, non_blocking=True)
             self.optimizer.zero_grad(set_to_none=True)
             optimizer_stepped = False
 
@@ -255,7 +266,14 @@ class ContrastiveTrainer:
             autocast_ctx = torch.autocast(device_type=self.device.type, dtype=amp_dtype) if amp_enabled else nullcontext()
             with autocast_ctx:
                 out = self.model(eeg=eeg, fmri=fmri)
-                loss = self.criterion(out["eeg_embed"], out["fmri_embed"])
+                loss_dict = self.criterion(
+                    eeg_shared=out["eeg_embed"],
+                    fmri_shared=out["fmri_embed"],
+                    eeg_private=out["eeg_private"],
+                    band_power_pred=out["band_power_pred"],
+                    band_power_target=band_power,
+                )
+                loss = loss_dict["loss"]
 
             if self.scaler.is_enabled():
                 self.scaler.scale(loss).backward()
@@ -275,10 +293,11 @@ class ContrastiveTrainer:
 
             if optimizer_stepped:
                 self.scheduler.step()
-            running += float(loss.item())
+            for key in running:
+                running[key] += float(loss_dict[key].item())
 
-        epoch_loss = running / max(1, len(self.train_loader))
-        return epoch_loss
+        denom = max(1, len(self.train_loader))
+        return {key: value / denom for key, value in running.items()}
 
     def evaluate_retrieval(self) -> dict[str, float]:
         """在当前训练集上计算双向检索指标（R@1/R@5）。"""
@@ -310,16 +329,21 @@ class ContrastiveTrainer:
         best = float("inf")
         best_epoch = 0
         last_train_loss = float("nan")
+        last_train_losses: dict[str, float] = {}
         last_retrieval_metrics: dict[str, float] = {}
         for epoch in range(self.start_epoch, self.epochs + 1):
-            train_loss = self.train_one_epoch(epoch)
-            last_train_loss = train_loss
+            train_losses = self.train_one_epoch(epoch)
+            last_train_loss = float(train_losses["loss"])
+            last_train_losses = train_losses
             last_retrieval_metrics = self.evaluate_retrieval()
 
             if is_main_process():
                 summary_parts = [
                     f"epoch={epoch:03d}/{self.epochs:03d}",
-                    f"train_loss={train_loss:.6f}",
+                    f"train_loss={train_losses['loss']:.6f}",
+                    f"contrastive_loss={train_losses['contrastive_loss']:.6f}",
+                    f"band_power_loss={train_losses['band_power_loss']:.6f}",
+                    f"separation_loss={train_losses['separation_loss']:.6f}",
                     f"lr={self.optimizer.param_groups[0]['lr']:.3e}",
                 ]
                 if last_retrieval_metrics:
@@ -327,10 +351,10 @@ class ContrastiveTrainer:
                     summary_parts.append(f"mean_r5={last_retrieval_metrics.get('mean_r5', float('nan')):.4f}")
                 print("Contrastive " + ", ".join(summary_parts), flush=True)
 
-            if train_loss < best:
-                best = train_loss
+            if train_losses["loss"] < best:
+                best = float(train_losses["loss"])
                 best_epoch = epoch
-                self.save_checkpoint(epoch, best, "best.pth", extra={"train_loss": train_loss})
+                self.save_checkpoint(epoch, best, "best.pth", extra={"train_loss": train_losses["loss"], "train_losses": train_losses})
 
         fold_elapsed_seconds = time.perf_counter() - stage_start_time
         final_metrics = {
@@ -339,6 +363,7 @@ class ContrastiveTrainer:
             "best_score": best,
             "selection_mode": "train_loss",
             "last_train_loss": last_train_loss,
+            "last_train_losses": last_train_losses,
             "last_retrieval_metrics": last_retrieval_metrics,
             "fold_elapsed_seconds": fold_elapsed_seconds,
         }

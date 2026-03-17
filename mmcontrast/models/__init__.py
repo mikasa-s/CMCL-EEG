@@ -5,3 +5,4 @@ from .eeg_cbramod_adapter import EEGCBraModAdapter
 from .fmri_adapter import FMRINeuroSTORMAdapter
 from .classifier import EEGfMRIClassifier
 from .multimodal_model import EEGfMRIContrastiveModel
+from .shared_private import EEGSharedPrivateEncoder, FMRISharedEncoder

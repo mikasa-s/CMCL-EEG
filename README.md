@@ -1,5 +1,35 @@
 # EEG-fMRI-Contrastive
 
+## Shared-Private EEG-fMRI 补充说明
+
+- EEG 频段目标不是从原始 256 Hz 片段直接提取。
+- 正确顺序是：先执行仓库原有 EEG 预处理流程，再从预处理后的 EEG 片段提取频段功率。
+- 当前仓库原有预处理会把 EEG 重采样到 `200 Hz`，因此 band-power 提取必须基于 `200 Hz` 的 8 秒片段。
+- 对应的单段长度应为 `8 x 200 = 1600` 个采样点。
+- 5 个频段固定为：
+  - delta: `0.5-4`
+  - theta: `4-8`
+  - alpha: `8-13`
+  - beta: `13-30`
+  - gamma: `30-40`
+- 这里的 gamma 必须截止到 `40 Hz`，不能高于 `40 Hz`，因为输入 EEG 在原预处理后已经限制到 `0.5-40 Hz`。
+- band-power 目标在预处理阶段离线计算，并保存为 shape `[N, 5]`；预训练阶段直接读取，不做在线频段计算。
+
+### 频段目标预处理命令
+
+在 joint cache 已经通过原预处理生成后，再执行：
+
+```bash
+python preprocess/compute_eeg_band_power_targets.py \
+  --manifest-csv cache/joint_contrastive/manifest_all.csv \
+  --root-dir cache/joint_contrastive \
+  --sample-rate-hz 200 \
+  --window-sec 8 \
+  --overwrite
+```
+
+如果直接用仓库自带 joint preprocessing 脚本，它现在会在原预处理完成后，自动继续计算 band-power，并且使用 `200 Hz`。
+
 当前仓库只保留一条正式工作流：
 
 1. 选择一个或多个数据集做 EEG-fMRI 联合对比学习预训练。

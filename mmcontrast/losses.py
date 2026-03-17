@@ -31,3 +31,42 @@ class SymmetricInfoNCELoss(torch.nn.Module):
         loss_eeg = F.cross_entropy(logits_eeg, labels)
         loss_fmri = F.cross_entropy(logits_fmri, labels)
         return 0.5 * (loss_eeg + loss_fmri)
+
+
+def separation_cosine_loss(shared: torch.Tensor, private: torch.Tensor) -> torch.Tensor:
+    shared_norm = F.normalize(shared, dim=-1)
+    private_norm = F.normalize(private, dim=-1)
+    cosine = (shared_norm * private_norm).sum(dim=-1)
+    return (cosine ** 2).mean()
+
+
+class SharedPrivatePretrainLoss(torch.nn.Module):
+    def __init__(
+        self,
+        temperature: float = 0.07,
+        band_power_weight: float = 1.0,
+        separation_weight: float = 0.1,
+    ) -> None:
+        super().__init__()
+        self.info_nce = SymmetricInfoNCELoss(temperature=temperature)
+        self.band_power_weight = float(band_power_weight)
+        self.separation_weight = float(separation_weight)
+
+    def forward(
+        self,
+        eeg_shared: torch.Tensor,
+        fmri_shared: torch.Tensor,
+        eeg_private: torch.Tensor,
+        band_power_pred: torch.Tensor,
+        band_power_target: torch.Tensor,
+    ) -> dict[str, torch.Tensor]:
+        contrastive = self.info_nce(eeg_shared, fmri_shared)
+        band_power = F.mse_loss(band_power_pred, band_power_target)
+        separation = separation_cosine_loss(eeg_shared, eeg_private)
+        total = contrastive + (self.band_power_weight * band_power) + (self.separation_weight * separation)
+        return {
+            "loss": total,
+            "contrastive_loss": contrastive,
+            "band_power_loss": band_power,
+            "separation_loss": separation,
+        }

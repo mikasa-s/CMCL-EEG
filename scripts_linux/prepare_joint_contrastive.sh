@@ -153,3 +153,11 @@ echo "Output root: ${OUTPUT_ROOT}"
 echo "EEG window sec: ${EEG_WINDOW_SEC}"
 
 "${PYTHON}" "${CLI_ARGS[@]}"
+
+echo "Computing EEG band-power targets..."
+"${PYTHON}" "${REPO_ROOT}/preprocess/compute_eeg_band_power_targets.py" \
+    --manifest-csv "${OUTPUT_ROOT}/manifest_all.csv" \
+    --root-dir "${OUTPUT_ROOT}" \
+    --sample-rate-hz "200" \
+    --window-sec "${EEG_WINDOW_SEC}" \
+    --overwrite

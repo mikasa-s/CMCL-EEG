@@ -35,6 +35,9 @@ eeg_model:
   d_model: 200
   dim_feedforward: 800
   seq_len: 8
+  shared_dim: 256
+  private_dim: 256
+  band_power_dim: 5
   n_layer: 12
   nhead: 8
   freeze_backbone: false
@@ -42,6 +45,7 @@ eeg_model:
 fmri_model:
   backbone: neurostorm
   checkpoint_path: ""
+  shared_dim: 256
   img_size: [48, 48, 48, 1]
   in_chans: 1
   embed_dim: 24
@@ -61,6 +65,7 @@ finetune:
   num_classes: 2
   selection_metric: accuracy
   fusion: eeg_only
+  classifier_mode: concat
   eeg_baseline:
     enabled: false
     model_name: cbramod

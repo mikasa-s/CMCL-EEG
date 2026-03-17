@@ -29,6 +29,7 @@ class PairedSamplePreparer:
         fmri_normalize_nonzero_only: bool = True,
         require_eeg: bool = True,
         require_fmri: bool = True,
+        require_band_power: bool = False,
         subject_pack_cache_size: int = 5,
         eeg_channel_indices: list[int] | tuple[int, ...] | None = None,
     ) -> None:
@@ -45,6 +46,7 @@ class PairedSamplePreparer:
         self.fmri_normalize_nonzero_only = bool(fmri_normalize_nonzero_only)
         self.require_eeg = bool(require_eeg)
         self.require_fmri = bool(require_fmri)
+        self.require_band_power = bool(require_band_power)
         self.subject_pack_cache_size = max(0, int(subject_pack_cache_size))
         self.eeg_channel_indices = tuple(int(index) for index in eeg_channel_indices) if eeg_channel_indices else None
         self._subject_pack_cache: OrderedDict[str, dict[str, np.ndarray]] = OrderedDict()
@@ -202,10 +204,23 @@ class PairedSamplePreparer:
         output = self.prepare_fmri_batch(np.expand_dims(ensure_volume_channel_first(fmri), axis=0), source)
         return output[0]
 
+    def prepare_band_power(self, band_power: np.ndarray, source: Path) -> torch.Tensor:
+        output = np.array(band_power, dtype=np.float32, copy=True)
+        if output.ndim != 1:
+            raise ValueError(f"Band-power target must be 1D [5], got {output.shape} from {source}")
+        return torch.from_numpy(output)
+
+    def prepare_band_power_batch(self, band_power: np.ndarray, source: Path) -> torch.Tensor:
+        output = np.array(band_power, dtype=np.float32, copy=True)
+        if output.ndim != 2:
+            raise ValueError(f"Band-power batch must be 2D [N,5], got {output.shape} from {source}")
+        return torch.from_numpy(output)
+
     def preload_subject_rows(self, df: pd.DataFrame) -> dict[str, Any]:
         eeg_tensors: list[torch.Tensor] = []
         fmri_tensors: list[torch.Tensor] = []
         labels: list[torch.Tensor] = []
+        band_power_tensors: list[torch.Tensor] = []
         sample_ids: list[str] = []
         subjects: list[str] = []
 
@@ -225,6 +240,11 @@ class PairedSamplePreparer:
                     raise ValueError(f"Subject pack missing fMRI array: {pack_path}")
                 fmri_tensors.append(self.prepare_fmri_batch(pack["fmri"][:sample_count], pack_path))
 
+            if self.require_band_power:
+                if "band_power" not in pack:
+                    raise ValueError(f"Subject pack missing band_power array: {pack_path}")
+                band_power_tensors.append(self.prepare_band_power_batch(pack["band_power"][:sample_count], pack_path))
+
             if "sample_id" in pack:
                 sample_ids.extend(str(value) for value in pack["sample_id"][:sample_count])
             else:
@@ -243,12 +263,14 @@ class PairedSamplePreparer:
             "subject": subjects,
             "eeg": torch.cat(eeg_tensors, dim=0) if eeg_tensors else None,
             "fmri": torch.cat(fmri_tensors, dim=0) if fmri_tensors else None,
+            "band_power": torch.cat(band_power_tensors, dim=0) if band_power_tensors else None,
             "label": torch.cat(labels, dim=0) if labels else None,
         }
 
     def preload_manifest_rows(self, df: pd.DataFrame) -> dict[str, Any]:
         eeg_tensors: list[torch.Tensor] = []
         fmri_tensors: list[torch.Tensor] = []
+        band_power_tensors: list[torch.Tensor] = []
         labels: list[int] = []
         sample_ids: list[str] = []
 
@@ -267,6 +289,12 @@ class PairedSamplePreparer:
             elif self.require_fmri:
                 raise ValueError("fMRI path is required for this dataset but missing in manifest row.")
 
+            if "band_power_path" in row and not pd.isna(row["band_power_path"]):
+                band_power_path = self.resolve_path(str(row["band_power_path"]))
+                band_power_tensors.append(self.prepare_band_power(self.load_array(band_power_path), band_power_path))
+            elif self.require_band_power:
+                raise ValueError("Band-power path is required for this dataset but missing in manifest row.")
+
             if "label" in row:
                 labels.append(int(row["label"]))
 
@@ -275,6 +303,7 @@ class PairedSamplePreparer:
             "subject": None,
             "eeg": torch.stack(eeg_tensors, dim=0) if eeg_tensors else None,
             "fmri": torch.stack(fmri_tensors, dim=0) if fmri_tensors else None,
+            "band_power": torch.stack(band_power_tensors, dim=0) if band_power_tensors else None,
             "label": torch.tensor(labels, dtype=torch.long) if labels else None,
         }
 

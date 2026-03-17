@@ -260,11 +260,22 @@ class TrainConfig:
         eeg_cfg = self.section("eeg_model")
         fmri_cfg = self.section("fmri_model")
         train_cfg = self.section("train")
+        eeg_shared_dim = int(eeg_cfg.get("shared_dim", train_cfg.get("projection_dim", 256)))
+        eeg_private_dim = int(eeg_cfg.get("private_dim", eeg_shared_dim))
+        eeg_band_power_dim = int(eeg_cfg.get("band_power_dim", 5))
+        fmri_shared_dim = int(fmri_cfg.get("shared_dim", eeg_shared_dim))
 
         required_sections = ["train", "data", "eeg_model", "fmri_model"]
         for section_name in required_sections:
             if section_name not in self.raw:
                 raise ValueError(f"Missing required config section: {section_name}")
+
+        if eeg_shared_dim <= 0 or eeg_private_dim <= 0:
+            raise ValueError("eeg_model.shared_dim and eeg_model.private_dim must be positive")
+        if eeg_band_power_dim != 5:
+            raise ValueError("eeg_model.band_power_dim must be 5 for the fixed EEG band-power target")
+        if fmri_shared_dim != eeg_shared_dim:
+            raise ValueError("fmri_model.shared_dim must match eeg_model.shared_dim for shared InfoNCE")
 
         # 对比学习使用单一 manifest；微调仍使用 train/val/test manifests。
         manifest_value = str(data_cfg.get("manifest_csv", data_cfg.get("train_manifest_csv", "")))
@@ -292,6 +303,9 @@ class TrainConfig:
 
         if "finetune" in self.raw:
             finetune_cfg = self.section("finetune")
+            classifier_mode = str(finetune_cfg.get("classifier_mode", "concat")).strip().lower()
+            if classifier_mode not in {"shared", "private", "concat"}:
+                raise ValueError("finetune.classifier_mode must be one of: shared, private, concat")
         for split_key in ["train_manifest_csv", "val_manifest_csv", "test_manifest_csv"]:
             split_value = data_cfg.get(split_key, "")
             split_path = "" if split_value is None else str(split_value).strip()

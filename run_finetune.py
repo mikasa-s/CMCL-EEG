@@ -38,6 +38,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--eeg-baseline-model", type=str, default="")
     parser.add_argument("--eeg-baseline-load-pretrained", type=str, default="")
     parser.add_argument("--eeg-baseline-checkpoint", type=str, default="")
+    parser.add_argument("--classifier-mode", type=str, default="")
     parser.add_argument("--test-only", action="store_true")
     parser.add_argument("--force-cpu", action="store_true")
     parser.add_argument(
@@ -112,6 +113,8 @@ def apply_overrides(config: dict, args: argparse.Namespace) -> dict:
         )
     if args.eeg_baseline_checkpoint.strip():
         assign_nested_value(config, "finetune.eeg_baseline.checkpoint_path", args.eeg_baseline_checkpoint.strip())
+    if args.classifier_mode.strip():
+        assign_nested_value(config, "finetune.classifier_mode", args.classifier_mode.strip())
 
     if args.force_cpu:
         assign_nested_value(config, "train.force_cpu", True)

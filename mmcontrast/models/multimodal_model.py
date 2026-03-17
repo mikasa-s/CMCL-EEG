@@ -1,14 +1,11 @@
 from __future__ import annotations
 
-"""EEG 与 fMRI 双塔对比学习模型。"""
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .eeg_cbramod_adapter import EEGCBraModAdapter
 from .eeg_channel_summary import build_eeg_channel_summary
-from .fmri_adapter import FMRINeuroSTORMAdapter
+from .shared_private import EEGSharedPrivateEncoder, FMRISharedEncoder
 
 
 class EEGfMRIContrastiveModel(nn.Module):
@@ -19,45 +16,48 @@ class EEGfMRIContrastiveModel(nn.Module):
         fmri_cfg = cfg["fmri_model"]
         train_cfg = cfg["train"]
 
-        # 两个编码器各自负责把原始模态映射到特征空间。
-        self.eeg_encoder = EEGCBraModAdapter(**eeg_cfg)
-        self.fmri_encoder = FMRINeuroSTORMAdapter(**fmri_cfg)
+        shared_dim = int(eeg_cfg.get("shared_dim", train_cfg.get("projection_dim", 256)))
+        head_dropout = float(train_cfg.get("head_dropout", 0.0))
+        self.eeg_encoder = EEGSharedPrivateEncoder(
+            eeg_cfg,
+            head_cfg={
+                "shared_dim": shared_dim,
+                "private_dim": int(eeg_cfg.get("private_dim", shared_dim)),
+                "band_power_dim": int(eeg_cfg.get("band_power_dim", 5)),
+                "head_dropout": head_dropout,
+            },
+        )
+        self.fmri_encoder = FMRISharedEncoder(
+            fmri_cfg,
+            head_cfg={
+                "shared_dim": int(fmri_cfg.get("shared_dim", shared_dim)),
+                "head_dropout": head_dropout,
+            },
+        )
 
-        # 投影头把两种模态的特征拉到同一个对比学习空间。
-        proj_dim = int(train_cfg.get("projection_dim", 256))
-        self.eeg_proj = nn.Linear(self.eeg_encoder.feature_dim, proj_dim)
-        self.fmri_proj = nn.Linear(self.fmri_encoder.feature_dim, proj_dim)
         channel_summary = build_eeg_channel_summary(cfg.get("data", {}))
-        self.initialization_summary = "Contrastive model: EEG encoder=cbramod, fMRI encoder=neurostorm."
+        self.initialization_summary = "Contrastive model: EEG encoder=cbramod(shared/private), fMRI encoder=neurostorm(shared)."
         if channel_summary:
             self.initialization_summary = f"{self.initialization_summary} {channel_summary}"
 
-    def encode_eeg_feature(self, eeg: torch.Tensor) -> torch.Tensor:
-        """提取 EEG 模态特征，不做投影归一化。"""
+    def encode_eeg_outputs(self, eeg: torch.Tensor) -> dict[str, torch.Tensor]:
         return self.eeg_encoder(eeg)
 
-    def encode_fmri_feature(self, fmri: torch.Tensor) -> torch.Tensor:
-        """提取 fMRI 模态特征，不做投影归一化。"""
+    def encode_eeg_feature(self, eeg: torch.Tensor, mode: str = "concat") -> torch.Tensor:
+        return self.eeg_encoder.encode_for_finetune(eeg, mode=mode)
+
+    def encode_fmri_outputs(self, fmri: torch.Tensor) -> dict[str, torch.Tensor]:
         return self.fmri_encoder(fmri)
 
-    def project_eeg(self, eeg_feat: torch.Tensor) -> torch.Tensor:
-        """把 EEG 特征映射到对比学习嵌入空间。"""
-        return F.normalize(self.eeg_proj(eeg_feat), dim=-1)
-
-    def project_fmri(self, fmri_feat: torch.Tensor) -> torch.Tensor:
-        """把 fMRI 特征映射到对比学习嵌入空间。"""
-        return F.normalize(self.fmri_proj(fmri_feat), dim=-1)
+    def encode_fmri_feature(self, fmri: torch.Tensor) -> torch.Tensor:
+        return self.fmri_encoder(fmri)["fmri_shared"]
 
     def forward(self, eeg: torch.Tensor, fmri: torch.Tensor) -> dict[str, torch.Tensor]:
-        """同时返回原始特征和归一化后的对比嵌入。"""
-        eeg_feat = self.encode_eeg_feature(eeg)
-        fmri_feat = self.encode_fmri_feature(fmri)
-
-        eeg_embed = self.project_eeg(eeg_feat)
-        fmri_embed = self.project_fmri(fmri_feat)
+        eeg_outputs = self.encode_eeg_outputs(eeg)
+        fmri_outputs = self.encode_fmri_outputs(fmri)
         return {
-            "eeg_feat": eeg_feat,
-            "fmri_feat": fmri_feat,
-            "eeg_embed": eeg_embed,
-            "fmri_embed": fmri_embed,
+            **eeg_outputs,
+            **fmri_outputs,
+            "eeg_embed": F.normalize(eeg_outputs["eeg_shared"], dim=-1),
+            "fmri_embed": F.normalize(fmri_outputs["fmri_shared"], dim=-1),
         }
