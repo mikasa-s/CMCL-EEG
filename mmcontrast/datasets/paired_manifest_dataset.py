@@ -12,6 +12,7 @@ from .sample_preparer import PairedSamplePreparer
 
 
 class PairedEEGfMRIDataset(Dataset):
+    _JOINT_CHANNEL_MANIFEST = Path(__file__).resolve().parents[2] / "cache" / "joint_contrastive" / "eeg_channels_target.csv"
     """
     通过 CSV 清单驱动的数据集。
 
@@ -89,10 +90,10 @@ class PairedEEGfMRIDataset(Dataset):
 
     @classmethod
     def _resolve_named_eeg_channel_indices(cls, root_dir: str, target_manifest: str) -> list[int] | None:
-        if not root_dir or not target_manifest:
+        current_manifest_path = Path(target_manifest) if target_manifest else (Path(root_dir) / "eeg_channels_target.csv" if root_dir else None)
+        desired_manifest_path = cls._JOINT_CHANNEL_MANIFEST
+        if current_manifest_path is None:
             return None
-        current_manifest_path = Path(root_dir) / "eeg_channels_target.csv"
-        desired_manifest_path = Path(target_manifest)
         if not current_manifest_path.exists() or not desired_manifest_path.exists():
             return None
 
@@ -102,13 +103,11 @@ class PairedEEGfMRIDataset(Dataset):
             return None
 
         current_index = {name: idx for idx, name in enumerate(current_names)}
-        missing = [name for name in desired_names if name not in current_index]
-        if missing:
-            raise ValueError(
-                f"Requested EEG target channels are missing from cache '{root_dir}': {missing[:8]}"
-                + (" ..." if len(missing) > 8 else "")
-            )
-        return [current_index[name] for name in desired_names]
+        desired_set = set(desired_names)
+        leading_indices = [current_index[name] for name in desired_names if name in current_index]
+        trailing_indices = [idx for idx, name in enumerate(current_names) if name not in desired_set]
+        ordered_indices = leading_indices + trailing_indices
+        return ordered_indices or None
 
     def __init__(
         self,

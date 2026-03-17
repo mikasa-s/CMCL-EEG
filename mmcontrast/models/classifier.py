@@ -95,6 +95,14 @@ class EEGfMRIClassifier(nn.Module):
                     summary_parts.append("Baseline pretrained loading enabled, but no checkpoint path was provided.")
                 else:
                     summary_parts.append("Baseline pretrained loading disabled.")
+                dropped_channels = getattr(getattr(self.eeg_encoder, "model", None), "dropped_channel_names", None)
+                if dropped_channels:
+                    dropped_text = ", ".join(dropped_channels[:8])
+                    if len(dropped_channels) > 8:
+                        dropped_text += ", ..."
+                    summary_parts.append(
+                        f"LaBraM channel truncation dropped {len(dropped_channels)} tail channel(s): {dropped_text}."
+                    )
             if self.fmri_encoder is not None:
                 if fmri_checkpoint_path:
                     summary_parts.append(f"fMRI encoder checkpoint={fmri_checkpoint_path}.")

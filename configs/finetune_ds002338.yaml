@@ -14,8 +14,8 @@ data:
   root_dir: cache/ds002338
   preload_dataset: true
   eeg_channel_subset: auto
-  eeg_channel_target_manifest: cache/joint_contrastive/eeg_channels_target.csv
-  expected_eeg_shape: [40, 8, 200]
+  eeg_channel_target_manifest: cache/ds002338/eeg_channels_target.csv
+  expected_eeg_shape: [63, 8, 200]
   expected_fmri_shape: [48, 48, 48, 1]
   normalize_eeg: true
   normalize_fmri: true
@@ -65,7 +65,7 @@ finetune:
     enabled: false
     model_name: cbramod
     num_classes: 2
-    num_channels: 40
+    num_channels: 63
     num_timepoints: 200
     load_pretrained_weights: false
     checkpoint_path: ""
