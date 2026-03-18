@@ -23,7 +23,7 @@ runtime_configs:
 metric:
   type: csv
   path: finetune/loso_finetune_summary.csv
-  column: accuracy
+  column: macro_f1
   row_filter:
     fold: CROSS_FOLD_MEAN_STD
 
@@ -144,7 +144,7 @@ modes:
     static_args: [--skip-pretrain]
     metric:
       path: finetune/loso_finetune_summary.csv
-      column: accuracy
+      column: macro_f1
       row_filter:
         fold: CROSS_FOLD_MEAN_STD
     parameter_groups: [finetune]

@@ -191,13 +191,17 @@ class SVMClassifier:
     def summary(self) -> dict[str, Any]:
         if not self.is_fitted:
             raise RuntimeError("SVM must be fitted before requesting summary")
+        n_support = getattr(self.clf, "n_support_", None)
+        n_support_list = [int(v) for v in n_support.tolist()] if hasattr(n_support, "tolist") else [int(v) for v in (n_support or [])]
+        dual_coef = getattr(self.clf, "dual_coef_", None)
+        intercept = getattr(self.clf, "intercept_", None)
         summary: dict[str, Any] = {
             "num_classes": int(self.num_classes),
             "kernel": getattr(self.clf, "kernel", ""),
-            "support_vector_count": int(sum(getattr(self.clf, "n_support_", []) or [])),
-            "support_vectors_per_class": [int(v) for v in getattr(self.clf, "n_support_", [])],
-            "dual_coef_shape": list(getattr(self.clf, "dual_coef_", []).shape) if hasattr(getattr(self.clf, "dual_coef_", None), "shape") else [],
-            "intercept_shape": list(getattr(self.clf, "intercept_", []).shape) if hasattr(getattr(self.clf, "intercept_", None), "shape") else [],
+            "support_vector_count": int(sum(n_support_list)),
+            "support_vectors_per_class": n_support_list,
+            "dual_coef_shape": list(dual_coef.shape) if hasattr(dual_coef, "shape") else [],
+            "intercept_shape": list(intercept.shape) if hasattr(intercept, "shape") else [],
         }
         return summary
 
@@ -930,6 +934,12 @@ class EEGBaselineModel(nn.Module):
             return self.model.predict_proba(X)
         else:
             raise AttributeError(f"predict_proba() is only available for SVM model, not {self.model_name}")
+
+    def summary(self) -> dict[str, Any]:
+        """SVM 专用模型摘要。"""
+        if self.model_name.lower() == "svm":
+            return self.model.summary()
+        raise AttributeError(f"summary() is only available for SVM model, not {self.model_name}")
 
 
 def is_foundation_model(model_name: str) -> bool:

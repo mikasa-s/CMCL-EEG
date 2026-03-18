@@ -63,7 +63,7 @@ finetune:
   output_dir: outputs/ds002338/finetune/fold_ds002338_sub01
   contrastive_checkpoint_path: ""
   num_classes: 2
-  selection_metric: accuracy
+  selection_metric: macro_f1
   fusion: eeg_only
   classifier_mode: concat
   eeg_baseline:
