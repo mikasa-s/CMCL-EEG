@@ -797,3 +797,65 @@ study:
 - `outputs/<dataset>/finetune/fold_*/test_metrics.json`
 - `outputs/<dataset>/finetune/loso_finetune_summary.csv`
 - `pretrained_weights/contrastive_best.pth`
+## 附录：对比学习离线可视化
+
+为了单独检查 shared/private 表征和跨模态对齐效果，仓库提供了离线可视化脚本：
+
+- `run_visualize_contrastive.py`
+
+当前脚本会输出两类图片：
+
+- `t-SNE`：同时显示 `EEG shared`、`EEG private`、`fMRI shared`
+- 跨模态相似度热力图：显示 `EEG shared` 和 `fMRI shared` 的余弦相似度矩阵
+
+输出文件：
+
+- `tsne_shared_private_001.png`
+- `cross_modal_similarity_heatmap_001.png`
+- `visualization_summary_001.json`
+
+重复运行时，文件名会自动递增，例如 `_002`、`_003`，不会覆盖之前的结果。
+
+依赖：
+
+- `matplotlib`
+- `scikit-learn`
+
+已经写入 `requirements.txt`。
+
+### Windows
+
+```powershell
+python .\run_visualize_contrastive.py `
+  --config configs\train_joint_contrastive.yaml `
+  --checkpoint outputs\joint_contrastive\contrastive\checkpoints\best.pth `
+  --output-dir outputs\visualizations\contrastive `
+  --max-samples 256 `
+  --batch-size 32
+```
+
+### Linux
+
+```bash
+python run_visualize_contrastive.py \
+  --config configs/train_joint_contrastive.yaml \
+  --checkpoint outputs/joint_contrastive/contrastive/checkpoints/best.pth \
+  --output-dir outputs/visualizations/contrastive \
+  --max-samples 256 \
+  --batch-size 32
+```
+
+常用参数：
+
+- `--manifest`：覆盖配置里的 manifest
+- `--root-dir`：覆盖配置里的数据根目录
+- `--max-samples`：限制参与可视化的样本数
+- `--tsne-max-points`：限制 t-SNE 每类最多画多少点
+- `--heatmap-max-points`：限制热力图显示多少对样本
+- `--device cpu`：强制在 CPU 上运行
+
+可视化产物默认位于：
+
+- `outputs/visualizations/contrastive/tsne_shared_private_001.png`
+- `outputs/visualizations/contrastive/cross_modal_similarity_heatmap_001.png`
+- `outputs/visualizations/contrastive/visualization_summary_001.json`
