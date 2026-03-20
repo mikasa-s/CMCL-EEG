@@ -88,3 +88,7 @@ finetune:
   amp_dtype: fp16
   log_interval: 100
   eval_interval: 1
+  visualization:
+    train_curve:
+      enabled: false
+      output_dir: ""

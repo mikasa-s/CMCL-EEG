@@ -17,6 +17,14 @@ from .datasets import PairedEEGfMRIDataset
 from .distributed import cleanup_distributed, configure_cudnn, configure_runtime_devices, gather_tensor, init_distributed, is_dist_initialized, is_main_process, runtime_summary
 from .metrics import classification_metrics
 from .models import EEGfMRIClassifier
+from .visualization import next_indexed_output_path, save_finetune_loss_curve
+
+
+def _build_grad_scaler(enabled: bool) -> torch.amp.GradScaler | torch.cuda.amp.GradScaler:
+    grad_scaler_cls = getattr(torch.amp, "GradScaler", None)
+    if grad_scaler_cls is not None:
+        return grad_scaler_cls("cuda", enabled=enabled)
+    return torch.cuda.amp.GradScaler(enabled=enabled)
 
 
 class FinetuneTrainer:
@@ -149,16 +157,23 @@ class FinetuneTrainer:
         self.early_stop_min_delta = float(finetune_cfg.get("early_stop_min_delta", 0.0))
         self.use_amp = bool(finetune_cfg.get("use_amp", True))
         self.amp_dtype = str(finetune_cfg.get("amp_dtype", "fp16"))
-        self.scaler = torch.amp.GradScaler("cuda", enabled=self.use_amp and self.amp_dtype == "fp16")
+        self.scaler = _build_grad_scaler(enabled=self.use_amp and self.amp_dtype == "fp16")
 
         self.output_dir = self.resolve_path(str(finetune_cfg.get("output_dir", "outputs/finetune")))
         self.ckpt_dir = self.output_dir / "checkpoints"
         self.best_checkpoint_path = self.ckpt_dir / "best.pth"
+        visualization_cfg = finetune_cfg.get("visualization", {}) or {}
+        train_curve_cfg = visualization_cfg.get("train_curve", {}) or {}
+        self.enable_train_curve_visualization = bool(train_curve_cfg.get("enabled", False))
+        visual_output_dir = str(train_curve_cfg.get("output_dir", "")).strip()
+        self.train_curve_output_dir = self.resolve_path(visual_output_dir) if visual_output_dir else (self.output_dir / "visualizations")
         eval_ckpt = str(finetune_cfg.get("eval_checkpoint_path", "")).strip()
         self.eval_checkpoint_path = self.resolve_path(eval_ckpt) if eval_ckpt else self.best_checkpoint_path
         self.test_only_mode = bool(finetune_cfg.get("test_only", False))
         if is_main_process():
             self.ckpt_dir.mkdir(parents=True, exist_ok=True)
+            if self.enable_train_curve_visualization:
+                self.train_curve_output_dir.mkdir(parents=True, exist_ok=True)
 
     @staticmethod
     def count_parameters(model: torch.nn.Module) -> tuple[int, int]:
@@ -277,6 +292,28 @@ class FinetuneTrainer:
             return
         with open(self.output_dir / name, "w", encoding="utf-8") as handle:
             json.dump(metrics, handle, ensure_ascii=False, indent=2)
+
+    def save_train_curve_artifacts(self, history: list[dict[str, Any]]) -> dict[str, Any] | None:
+        if not is_main_process() or not self.enable_train_curve_visualization:
+            return None
+        plot_path = next_indexed_output_path(self.train_curve_output_dir, "train_loss_curve", ".png")
+        history_path = next_indexed_output_path(self.train_curve_output_dir, "train_loss_history", ".json")
+        history_csv_path = next_indexed_output_path(self.train_curve_output_dir, "train_loss_history", ".csv")
+        report = save_finetune_loss_curve(
+            history=history,
+            output_path=plot_path,
+            title=f"Finetune Loss Curve ({self.output_dir.name})",
+        )
+        with open(history_path, "w", encoding="utf-8") as handle:
+            json.dump(history, handle, ensure_ascii=False, indent=2)
+        with open(history_csv_path, "w", encoding="utf-8", newline="") as handle:
+            fieldnames = ["epoch", "train_loss", "val_loss", "val_accuracy", "val_macro_f1", "lr"]
+            writer = csv.DictWriter(handle, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(history)
+        report["history_path"] = str(history_path)
+        report["history_csv_path"] = str(history_csv_path)
+        return report
 
     def fit_svm_baseline(self) -> None:
         if hasattr(self.model, "module"):
@@ -534,6 +571,7 @@ class FinetuneTrainer:
         last_val_metrics = None
         epochs_without_improvement = 0
         early_stopped = False
+        training_history: list[dict[str, Any]] = []
         for epoch in range(1, self.epochs + 1):
             train_loss = self.train_one_epoch(epoch)
             last_train_loss = train_loss
@@ -542,6 +580,16 @@ class FinetuneTrainer:
             if self.val_loader is not None and epoch % self.eval_interval == 0:
                 val_metrics = self.evaluate(self.val_loader, split_name="val")
                 last_val_metrics = val_metrics
+            training_history.append(
+                {
+                    "epoch": int(epoch),
+                    "train_loss": float(train_loss),
+                    "val_loss": None if val_metrics is None else float(val_metrics["loss"]),
+                    "val_accuracy": None if val_metrics is None else float(val_metrics["accuracy"]),
+                    "val_macro_f1": None if val_metrics is None else float(val_metrics["macro_f1"]),
+                    "lr": float(self.optimizer.param_groups[0]["lr"]),
+                }
+            )
 
             if is_main_process():
                 summary_parts = [
@@ -598,6 +646,9 @@ class FinetuneTrainer:
         }
         if last_val_metrics is not None:
             final_metrics["last_val_metrics"] = last_val_metrics
+        curve_report = self.save_train_curve_artifacts(training_history)
+        if curve_report is not None:
+            final_metrics["train_curve_visualization"] = curve_report
 
         if self.test_loader is not None:
             self.load_checkpoint(self.best_checkpoint_path)

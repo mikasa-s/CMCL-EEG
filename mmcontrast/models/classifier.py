@@ -36,10 +36,10 @@ class EEGfMRIClassifier(nn.Module):
         data_cfg = cfg["data"]
         eeg_channel_summary = build_eeg_channel_summary(data_cfg)
 
-        self.fusion = str(finetune_cfg.get("fusion", "eeg_only"))
+        self.fusion = str(finetune_cfg.get("fusion", "eeg_only")).strip().lower()
         self.classifier_mode = str(finetune_cfg.get("classifier_mode", "concat")).strip().lower()
-        if self.classifier_mode not in {"shared", "private", "concat"}:
-            raise ValueError("finetune.classifier_mode must be one of: shared, private, concat")
+        if self.classifier_mode not in {"shared", "private", "concat", "add"}:
+            raise ValueError("finetune.classifier_mode must be one of: shared, private, concat, add")
         baseline_cfg = dict(finetune_cfg.get("eeg_baseline", {}))
         self.use_eeg_baseline = bool(baseline_cfg.get("enabled", False)) and self.fusion != "fmri_only"
         self.baseline_outputs_logits = False
@@ -232,6 +232,13 @@ class EEGfMRIClassifier(nn.Module):
                 in_dim = eeg_dim
             elif self.fusion == "fmri_only":
                 in_dim = fmri_dim
+            elif self.fusion == "add":
+                if eeg_dim != fmri_dim:
+                    raise ValueError(
+                        "finetune.fusion=add requires EEG and fMRI feature dims to match, "
+                        f"got eeg_dim={eeg_dim}, fmri_dim={fmri_dim}"
+                    )
+                in_dim = eeg_dim
             else:
                 in_dim = eeg_dim + fmri_dim
 
@@ -252,6 +259,15 @@ class EEGfMRIClassifier(nn.Module):
                 return int(getattr(encoder, "shared_dim"))
             if self.classifier_mode == "private":
                 return int(getattr(encoder, "private_dim"))
+            if self.classifier_mode == "add":
+                shared_dim = int(getattr(encoder, "shared_dim"))
+                private_dim = int(getattr(encoder, "private_dim"))
+                if shared_dim != private_dim:
+                    raise ValueError(
+                        "finetune.classifier_mode=add requires shared_dim == private_dim, "
+                        f"got shared_dim={shared_dim}, private_dim={private_dim}"
+                    )
+                return shared_dim
             return int(getattr(encoder, "shared_dim")) + int(getattr(encoder, "private_dim"))
         return int(getattr(encoder, "feature_dim"))
 
@@ -290,8 +306,16 @@ class EEGfMRIClassifier(nn.Module):
             fused = fmri_feat
         else:
             if eeg_feat is None or fmri_feat is None:
-                raise ValueError("finetune.fusion=concat requires both EEG and fMRI input.")
-            fused = torch.cat([eeg_feat, fmri_feat], dim=-1)
+                raise ValueError(f"finetune.fusion={self.fusion} requires both EEG and fMRI input.")
+            if self.fusion == "add":
+                if eeg_feat.shape != fmri_feat.shape:
+                    raise ValueError(
+                        "finetune.fusion=add requires EEG and fMRI features to have the same shape, "
+                        f"got {tuple(eeg_feat.shape)} and {tuple(fmri_feat.shape)}"
+                    )
+                fused = eeg_feat + fmri_feat
+            else:
+                fused = torch.cat([eeg_feat, fmri_feat], dim=-1)
 
         logits = self.classifier(fused)
         return {

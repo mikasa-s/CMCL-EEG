@@ -2,31 +2,22 @@ train:
   force_cpu: false
   gpu_count: 1
   gpu_ids: []
-  batch_size: 128
-  eval_batch_size: 128
+  batch_size: 64
+  eval_batch_size: 64
   num_workers: 4
   pin_memory: true
 
 data:
-  train_manifest_csv: cache/ds002739/loso_subjectwise/fold_ds002739_sub01/manifest_train.csv
-  val_manifest_csv: cache/ds002739/loso_subjectwise/fold_ds002739_sub01/manifest_val.csv
-  test_manifest_csv: cache/ds002739/loso_subjectwise/fold_ds002739_sub01/manifest_test.csv
-  root_dir: cache/ds002739
+  train_manifest_csv: cache/ds009999/loso_subjectwise/fold_ds009999_sub01/manifest_train.csv
+  val_manifest_csv: cache/ds009999/loso_subjectwise/fold_ds009999_sub01/manifest_val.csv
+  test_manifest_csv: cache/ds009999/loso_subjectwise/fold_ds009999_sub01/manifest_test.csv
+  root_dir: cache/ds009999
   preload_dataset: false
   eeg_channel_subset: auto
-  eeg_channel_target_manifest: cache/ds002739/eeg_channels_target.csv
-  expected_eeg_shape: [40, 8, 200]
-  expected_fmri_shape: [48, 48, 48, 1]
+  eeg_channel_target_manifest: cache/ds009999/eeg_channels_target.csv
+  expected_eeg_shape: [62, 8, 200]
   normalize_eeg: true
-  normalize_fmri: true
   eeg_scale: 1.0
-  fmri_scale: 1.0
-  fmri_input_type: volume
-  fmri_target_shape: [48, 48, 48, 1]
-  fmri_spatial_strategy: pad_or_crop
-  fmri_temporal_strategy: pad_or_crop
-  fmri_pad_value: 0.0
-  fmri_normalize_nonzero_only: true
 
 eeg_model:
   checkpoint_path: ""
@@ -60,24 +51,25 @@ fmri_model:
   freeze_backbone: false
 
 finetune:
-  output_dir: outputs/ds002739/finetune/fold_ds002739_sub01
+  output_dir: outputs/ds009999/finetune/fold_ds009999_sub01
   contrastive_checkpoint_path: ""
-  num_classes: 2
+  num_classes: 3
   selection_metric: macro_f1
   fusion: eeg_only
   classifier_mode: concat
   eeg_baseline:
     enabled: false
     model_name: cbramod
-    num_classes: 2
-    num_channels: 40
+    num_classes: 3
+    num_channels: 62
     num_timepoints: 200
     load_pretrained_weights: false
     checkpoint_path: ""
   hidden_dim: 256
+  head_dropout: 0.0
   dropout: 0.2
   freeze_encoders: false
-  epochs: 20
+  epochs: 30
   lr: 0.0003
   min_lr: 0.00001
   weight_decay: 0.01
@@ -86,7 +78,7 @@ finetune:
   early_stop_min_delta: 0.0
   use_amp: true
   amp_dtype: fp16
-  log_interval: 200
+  log_interval: 100
   eval_interval: 1
   visualization:
     train_curve:

@@ -14,21 +14,11 @@ from mmcontrast.checkpoint_utils import extract_state_dict, load_checkpoint_file
 from mmcontrast.config import TrainConfig
 from mmcontrast.datasets import PairedEEGfMRIDataset
 from mmcontrast.models import EEGfMRIContrastiveModel
-from mmcontrast.visualization import save_cross_modal_similarity_heatmap, save_shared_private_tsne
+from mmcontrast.visualization import next_indexed_output_path, save_cross_modal_similarity_heatmap, save_shared_private_tsne
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
-
-
-def next_indexed_output_path(output_dir: Path, stem: str, suffix: str) -> Path:
-    pattern = f"{stem}_*{suffix}"
-    max_index = 0
-    for path in output_dir.glob(pattern):
-        suffix_text = path.stem[len(stem) + 1 :]
-        if suffix_text.isdigit():
-            max_index = max(max_index, int(suffix_text))
-    return output_dir / f"{stem}_{max_index + 1:03d}{suffix}"
 
 
 def parse_args() -> argparse.Namespace:

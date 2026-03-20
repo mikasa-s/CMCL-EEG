@@ -1,0 +1,118 @@
+study:
+  name: optuna_ds009999
+  default_mode: finetune_only
+  direction: maximize
+  n_trials: 20
+  output_dir: outputs/optuna/ds009999
+  command:
+    - powershell
+    - -ExecutionPolicy
+    - Bypass
+    - -File
+    - scripts/run_finetune_ds009999.ps1
+  static_args:
+    - -CacheRoot
+    - cache/ds009999
+  output_arg: -OutputRoot
+
+runtime_configs:
+  finetune_base: configs/finetune_ds009999.yaml
+  finetune_arg: -FinetuneConfig
+
+metric:
+  type: csv
+  path: finetune/loso_finetune_summary.csv
+  column: macro_f1
+  row_filter:
+    fold: CROSS_FOLD_MEAN_STD
+
+parameters:
+  train_epochs:
+    suggest: categorical
+    choices: [20, 30, 40]
+    target: config
+    config_updates:
+      - config: finetune
+        key: finetune.epochs
+
+  finetune_batch_size:
+    suggest: categorical
+    choices: [32, 64, 128]
+    target: config
+    config_updates:
+      - config: finetune
+        key: train.batch_size
+      - config: finetune
+        key: train.eval_batch_size
+
+  finetune_lr:
+    suggest: float
+    low: 1e-4
+    high: 1e-3
+    log: true
+    target: config
+    config_updates:
+      - config: finetune
+        key: finetune.lr
+
+  weight_decay:
+    suggest: float
+    low: 1e-6
+    high: 1e-2
+    log: true
+    target: config
+    config_updates:
+      - config: finetune
+        key: finetune.weight_decay
+
+  min_lr:
+    suggest: float
+    low: 1e-7
+    high: 1e-4
+    log: true
+    target: config
+    config_updates:
+      - config: finetune
+        key: finetune.min_lr
+
+  hidden_dim:
+    suggest: categorical
+    choices: [128, 256, 512]
+    target: config
+    config_updates:
+      - config: finetune
+        key: finetune.hidden_dim
+
+  grad_clip:
+    suggest: categorical
+    choices: [0.0, 0.5, 1.0, 5.0]
+    target: config
+    config_updates:
+      - config: finetune
+        key: finetune.grad_clip
+
+  early_stop_patience:
+    suggest: categorical
+    choices: [3, 5, 8, 10]
+    target: config
+    config_updates:
+      - config: finetune
+        key: finetune.early_stop_patience
+
+  classifier_mode:
+    suggest: categorical
+    choices: [shared, private, concat, add]
+    target: config
+    config_updates:
+      - config: finetune
+        key: finetune.classifier_mode
+
+parameter_groups:
+  pretrain: [train_epochs, pretrain_batch_size, pretrain_lr, weight_decay, min_lr, grad_clip]
+  finetune: [train_epochs, finetune_batch_size, finetune_lr, weight_decay, min_lr, hidden_dim, grad_clip, early_stop_patience]
+
+modes:
+  finetune_only:
+    study_name: optuna_ds009999_finetune_only
+    output_dir: outputs/optuna/ds009999_finetune_only
+    parameter_groups: [finetune]

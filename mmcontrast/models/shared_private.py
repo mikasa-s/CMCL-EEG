@@ -58,6 +58,13 @@ class EEGSharedPrivateEncoder(nn.Module):
             return outputs["eeg_shared"]
         if normalized_mode == "private":
             return outputs["eeg_private"]
+        if normalized_mode == "add":
+            if outputs["eeg_shared"].shape != outputs["eeg_private"].shape:
+                raise ValueError(
+                    "EEG classifier_mode=add requires eeg_shared and eeg_private to have the same shape, "
+                    f"got {tuple(outputs['eeg_shared'].shape)} and {tuple(outputs['eeg_private'].shape)}"
+                )
+            return outputs["eeg_shared"] + outputs["eeg_private"]
         if normalized_mode == "concat":
             return torch.cat((outputs["eeg_shared"], outputs["eeg_private"]), dim=-1)
         raise ValueError(f"Unsupported EEG classifier mode: {mode}")

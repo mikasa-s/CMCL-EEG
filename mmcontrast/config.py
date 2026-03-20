@@ -304,8 +304,12 @@ class TrainConfig:
         if "finetune" in self.raw:
             finetune_cfg = self.section("finetune")
             classifier_mode = str(finetune_cfg.get("classifier_mode", "concat")).strip().lower()
-            if classifier_mode not in {"shared", "private", "concat"}:
-                raise ValueError("finetune.classifier_mode must be one of: shared, private, concat")
+            if classifier_mode not in {"shared", "private", "concat", "add"}:
+                raise ValueError("finetune.classifier_mode must be one of: shared, private, concat, add")
+            visualization_cfg = finetune_cfg.get("visualization", {}) or {}
+            train_curve_cfg = visualization_cfg.get("train_curve", {}) or {}
+            if "enabled" in train_curve_cfg and not isinstance(train_curve_cfg.get("enabled"), bool):
+                raise ValueError("finetune.visualization.train_curve.enabled must be a boolean")
         for split_key in ["train_manifest_csv", "val_manifest_csv", "test_manifest_csv"]:
             split_value = data_cfg.get(split_key, "")
             split_path = "" if split_value is None else str(split_value).strip()
@@ -332,6 +336,8 @@ class TrainConfig:
             if bool(eeg_baseline_cfg.get("enabled", False)):
                 model_name = str(eeg_baseline_cfg.get("model_name", "cbramod")).strip().lower()
                 fusion = str(finetune_cfg.get("fusion", "eeg_only")).strip().lower()
+                if fusion not in {"eeg_only", "fmri_only", "concat", "add"}:
+                    raise ValueError("finetune.fusion must be one of: eeg_only, fmri_only, concat, add")
                 valid_models = {
                         "traditional": {"svm", "eeg_deformer", "eegnet", "conformer", "tsception"},
                         "foundation": {"labram", "cbramod"},

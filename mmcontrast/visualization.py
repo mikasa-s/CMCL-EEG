@@ -11,6 +11,18 @@ def _ensure_parent(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
 
 
+def next_indexed_output_path(output_dir: str | Path, stem: str, suffix: str) -> Path:
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    pattern = f"{stem}_*{suffix}"
+    max_index = 0
+    for path in output_dir.glob(pattern):
+        suffix_text = path.stem[len(stem) + 1 :]
+        if suffix_text.isdigit():
+            max_index = max(max_index, int(suffix_text))
+    return output_dir / f"{stem}_{max_index + 1:03d}{suffix}"
+
+
 def _to_numpy(x: torch.Tensor, max_items: int | None = None) -> np.ndarray:
     if max_items is not None and x.shape[0] > max_items:
         x = x[:max_items]
@@ -125,4 +137,58 @@ def save_cross_modal_similarity_heatmap(
         "num_points": int(sim_np.shape[0]),
         "diagonal_mean": diagonal_mean,
         "off_diagonal_mean": off_diagonal_mean,
+    }
+
+
+def save_finetune_loss_curve(
+    history: list[dict[str, Any]],
+    output_path: str | Path,
+    title: str | None = None,
+) -> dict[str, Any]:
+    try:
+        import matplotlib.pyplot as plt
+    except ImportError as exc:
+        raise ModuleNotFoundError(
+            "Finetune loss curve visualization requires matplotlib."
+        ) from exc
+
+    if not history:
+        return {"saved": False, "reason": "empty_history"}
+
+    epochs = [int(item["epoch"]) for item in history if "epoch" in item]
+    train_loss = [float(item["train_loss"]) for item in history if "train_loss" in item]
+    val_epochs = [
+        int(item["epoch"])
+        for item in history
+        if item.get("val_loss") is not None and np.isfinite(float(item["val_loss"]))
+    ]
+    val_loss = [
+        float(item["val_loss"])
+        for item in history
+        if item.get("val_loss") is not None and np.isfinite(float(item["val_loss"]))
+    ]
+    if not epochs or not train_loss:
+        return {"saved": False, "reason": "missing_loss_values"}
+
+    output = Path(output_path)
+    _ensure_parent(output)
+    fig, ax = plt.subplots(figsize=(8, 5), dpi=160)
+    ax.plot(epochs, train_loss, color="#1f77b4", linewidth=2.0, label="Train loss")
+    if val_epochs and val_loss:
+        ax.plot(val_epochs, val_loss, color="#d62728", linewidth=1.8, linestyle="--", label="Val loss")
+    ax.set_title(title or "Finetune Loss Curve")
+    ax.set_xlabel("Epoch")
+    ax.set_ylabel("Loss")
+    ax.grid(True, linestyle="--", linewidth=0.6, alpha=0.5)
+    ax.legend(frameon=False)
+    fig.tight_layout()
+    fig.savefig(output, bbox_inches="tight")
+    plt.close(fig)
+    return {
+        "saved": True,
+        "path": str(output),
+        "epoch_count": int(len(epochs)),
+        "has_val_loss": bool(val_epochs),
+        "min_train_loss": float(min(train_loss)),
+        "min_val_loss": float(min(val_loss)) if val_loss else float("nan"),
     }
