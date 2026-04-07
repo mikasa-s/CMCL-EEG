@@ -40,6 +40,7 @@ from preprocess_common import (
     write_loso_splits,
     write_subject_splits,
 )
+from preprocess_common import normalize_eeg_channel_name
 
 
 DOT_DIRECTION_LABELS = {
@@ -270,6 +271,35 @@ def save_common_electrode_manifest(out_root: Path, electrode_template: list[str]
     pd.DataFrame(rows).to_csv(out_root / "eeg_channel_intersection.csv", index=False)
 
 
+def make_target_channel_rows(channel_names: list[str]) -> list[dict[str, object]]:
+    return [{"target_channel_index": index, "target_channel_name": name} for index, name in enumerate(channel_names)]
+
+
+def build_export_channel_order(common_electrodes: list[str], requested_target_names: list[str] | None) -> list[str]:
+    if requested_target_names is None:
+        return list(common_electrodes)
+
+    common_by_name = {normalize_eeg_channel_name(name): name for name in common_electrodes}
+    ordered_targets: list[str] = []
+    seen: set[str] = set()
+    missing: list[str] = []
+    for channel_name in requested_target_names:
+        normalized = normalize_eeg_channel_name(channel_name)
+        resolved = common_by_name.get(normalized)
+        if resolved is None:
+            missing.append(str(channel_name))
+            continue
+        if normalized in seen:
+            continue
+        ordered_targets.append(resolved)
+        seen.add(normalized)
+    if missing:
+        raise ValueError(f"Requested target channels are missing from ds002739 common electrodes: {missing}")
+
+    trailing_channels = [name for name in common_electrodes if normalize_eeg_channel_name(name) not in seen]
+    return ordered_targets + trailing_channels
+
+
 def load_eeg_data(eeg_mat_path: Path, electrode_template: list[str]) -> tuple[np.ndarray, float, list[str]]:
     payload = load_mat_payload(eeg_mat_path)
     eeg_struct = payload["EEGdata"]
@@ -374,15 +404,6 @@ def load_fmri_events(events_tsv_path: Path, event_type: str) -> pd.DataFrame:
     filtered["onset"] = filtered["onset"].astype(np.float64)
     filtered["duration"] = filtered["duration"].astype(np.float64)
     return filtered.sort_values("onset").reset_index(drop=True)
-
-
-def estimate_eeg_fmri_offset_sec(eeg_trials: pd.DataFrame, fmri_events: pd.DataFrame) -> float:
-    eeg_tstim = eeg_trials["eeg_onset_sec"].to_numpy(dtype=np.float64)
-    fmri_tstim = fmri_events["onset"].to_numpy(dtype=np.float64)
-    if len(eeg_tstim) == 0 or len(fmri_tstim) == 0:
-        raise ValueError("Cannot estimate alignment offset because EEG or fMRI stimulus events are missing.")
-    count = min(len(eeg_tstim), len(fmri_tstim))
-    return float(np.median(eeg_tstim[:count] - fmri_tstim[:count]))
 
 
 def compute_fixed_window_sec(window_sec: float, min_window_sec: float) -> float | None:
@@ -526,7 +547,8 @@ def prepare_subject(
         fmri_events_path = func_dir / f"{subject}_task-main_{run}_events.tsv"
         eeg_data_path = eeg_dir / f"EEG_data_{subject}_{run}.mat"
         eeg_events_path = eeg_dir / f"EEG_events_{subject}_{run}.mat"
-        if not all(path.exists() for path in [bold_path, fmri_events_path, eeg_data_path, eeg_events_path]):
+        required_paths = [eeg_data_path, eeg_events_path] if args.eeg_only else [bold_path, fmri_events_path, eeg_data_path, eeg_events_path]
+        if not all(path.exists() for path in required_paths):
             continue
 
         raw_eeg_data, raw_sfreq, kept_electrodes = load_eeg_data(eeg_data_path, electrode_template=electrode_template)
@@ -534,9 +556,11 @@ def prepare_subject(
         eeg_data, processed_sfreq = preprocess_eeg(raw_eeg_data, source_sfreq=raw_sfreq, args=args)
         eeg_events = load_eeg_events(eeg_events_path)
         eeg_trials = build_eeg_trial_table(eeg_events)
-        fmri_events = load_fmri_events(fmri_events_path, event_type=args.fmri_event_type)
-        if fmri_events.empty:
-            continue
+        fmri_events = pd.DataFrame()
+        if not args.eeg_only:
+            fmri_events = load_fmri_events(fmri_events_path, event_type=args.fmri_event_type)
+            if fmri_events.empty:
+                continue
 
         if args.eeg_only:
             bold_shape = (0, 0, 0, 0)
@@ -562,14 +586,21 @@ def prepare_subject(
                 use_float16=bool(args.fmri_float16),
             )
 
-        pair_count = min(len(eeg_trials), len(fmri_events))
-        if pair_count == 0:
-            continue
-        eeg_trials = eeg_trials.iloc[:pair_count].reset_index(drop=True)
-        fmri_events = fmri_events.iloc[:pair_count].reset_index(drop=True)
-
-        eeg_fmri_offset_sec = estimate_eeg_fmri_offset_sec(eeg_trials=eeg_trials, fmri_events=fmri_events)
-        event_counts = {args.fmri_event_type: int(len(fmri_events))}
+        if args.eeg_only:
+            pair_count = len(eeg_trials)
+            if pair_count == 0:
+                continue
+            eeg_trials = eeg_trials.iloc[:pair_count].reset_index(drop=True)
+            eeg_fmri_offset_sec = 0.0
+            event_counts = {"eeg_trials": int(len(eeg_trials))}
+        else:
+            pair_count = min(len(eeg_trials), len(fmri_events))
+            if pair_count == 0:
+                continue
+            eeg_trials = eeg_trials.iloc[:pair_count].reset_index(drop=True)
+            fmri_events = fmri_events.iloc[:pair_count].reset_index(drop=True)
+            eeg_fmri_offset_sec = 0.0
+            event_counts = {"eeg_trials": int(len(eeg_trials)), args.fmri_event_type: int(len(fmri_events))}
         summaries.append(
             RunSummary(
                 subject=subject,
@@ -584,13 +615,10 @@ def prepare_subject(
                 eeg_sfreq_hz=processed_sfreq,
                 fmri_target_tr_sec=float(args.tr),
                 valid_trial_count=int(len(eeg_trials)),
-                fmri_trial_count=int(len(fmri_events)),
+                fmri_trial_count=0 if args.eeg_only else int(len(fmri_events)),
             )
         )
 
-        eeg_onsets = eeg_trials["eeg_onset_sec"].to_numpy(dtype=np.float64)
-        fmri_onsets = fmri_events["onset"].to_numpy(dtype=np.float64)
-        aligned_eeg_onsets = fmri_onsets + float(eeg_fmri_offset_sec)
         for event_index, trial_row in eeg_trials.iterrows():
             trial_type = "dot_stim_validtrials"
             label = int(trial_row["label"])
@@ -606,8 +634,8 @@ def prepare_subject(
             if eeg_window_length_sec is None or fmri_window_length_sec is None:
                 continue
 
-            fmri_onset_sec = float(fmri_events.iloc[event_index]["onset"])
-            eeg_onset_sec = float(aligned_eeg_onsets[event_index])
+            fmri_onset_sec = None if args.eeg_only else float(fmri_events.iloc[event_index]["onset"])
+            eeg_onset_sec = float(trial_row["eeg_onset_sec"])
 
             try:
                 eeg_window = slice_eeg_window(
@@ -626,14 +654,14 @@ def prepare_subject(
                     fmri_window = slice_fmri_window(
                         fmri_source,
                         tr=args.tr,
-                        start_sec=fmri_onset_sec,
+                        start_sec=float(fmri_onset_sec),
                         duration_sec=fmri_window_length_sec,
                     )
                 else:
                     fmri_window = slice_fmri_volume_window(
                         fmri_source,
                         tr=args.tr,
-                        start_sec=fmri_onset_sec,
+                        start_sec=float(fmri_onset_sec),
                         duration_sec=fmri_window_length_sec,
                     )
                 if fmri_window is not None:
@@ -756,9 +784,9 @@ def main() -> None:
     subjects = find_subjects(ds_root, args.subjects)
     canonical_subject_map = build_canonical_subject_map(subjects)
     electrode_template = load_electrode_template(ds_root)
-    target_channel_names = load_target_channel_names(args.target_channel_manifest.resolve()) if args.target_channel_manifest is not None else None
-    if target_channel_names is None:
-        target_channel_names = compute_common_electrodes(ds_root, subjects, args.runs, electrode_template)
+    requested_target_names = load_target_channel_names(args.target_channel_manifest.resolve()) if args.target_channel_manifest is not None else None
+    common_electrodes = compute_common_electrodes(ds_root, subjects, args.runs, electrode_template)
+    target_channel_names = build_export_channel_order(common_electrodes, requested_target_names=requested_target_names)
     save_common_electrode_manifest(out_root, electrode_template, target_channel_names)
     print(f"Using {len(target_channel_names)} EEG channels for ds002739 export.")
     records: list[SampleRecord] = []
@@ -839,6 +867,7 @@ def main() -> None:
     pd.DataFrame(summary.__dict__ for summary in sorted(summaries, key=lambda item: (item.subject, item.run))).to_csv(out_root / "run_summary.csv", index=False)
     write_subject_mapping(subject_mapping_rows, out_root / "subject_mapping.csv")
     write_channel_metadata(channel_metadata_rows, out_root / "eeg_channels_dataset.csv")
+    write_channel_metadata(make_target_channel_rows(target_channel_names), out_root / "eeg_channels_target.csv")
     write_channel_metadata(channel_mapping_rows, out_root / "eeg_channel_mapping.csv")
 
     manifest_path = out_root / "manifest_all.csv"

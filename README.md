@@ -14,6 +14,10 @@
 - 适用数据集：`ds002336`、`ds002338`、`ds002739`、`ds009999(SEED)`
 - 支持 `classifier_mode=shared|private|concat`
 - 默认 `classifier_mode=concat`
+- 支持 `finetune.eeg_baseline` 切换到 EEG baseline
+- 当前支持的 baseline：
+  - traditional：`svm`、`eeg_deformer`、`eegnet`、`conformer`、`tsception`
+  - foundation：`labram`、`cbramod`
 - 微调模型按 `macro_f1` 选择最佳 checkpoint
 
 `ds009999` 是仓库内部对 `SEED` 的命名，只用于 EEG-only 微调，不参与 EEG-fMRI 联合预训练。
@@ -142,6 +146,28 @@ finetune:
 
 则当前代码会直接使用 pretrained EEG backbone 特征做分类，不会强行使用未初始化的 `shared/private` 头。
 
+### 5. EEG baseline 配置
+
+最小配置示例：
+
+```yaml
+finetune:
+  fusion: eeg_only
+  eeg_baseline:
+    enabled: true
+    model_name: eegnet
+    load_pretrained_weights: false
+    checkpoint_path: ""
+```
+
+说明：
+
+- `traditional` baseline 只支持 `finetune.fusion=eeg_only`
+- `svm` 不支持 DDP，建议单卡或 `--force-cpu`
+- `foundation` baseline 中，`labram`、`cbramod` 可通过 `finetune.eeg_baseline.checkpoint_path` 加载预训练权重
+- 当 `finetune.eeg_baseline.enabled=true` 时，常规的 contrastive checkpoint 不再是主路径；传统 baseline 会直接走自身分类分支
+- `labram` 依赖 `timm`，如果缺失需要额外安装
+
 ## Windows 操作指南
 
 ### 1. 环境安装
@@ -214,7 +240,27 @@ python run_finetune.py --config configs\finetune_ds002338.yaml
 python run_finetune.py --config configs\finetune_ds009999.yaml
 ```
 
-### 11. LOSO 全折微调 ds009999
+### 11. 运行单个 EEG baseline
+
+例如，在 `ds009999` 上运行 `EEGNet`：
+
+```powershell
+python run_finetune.py --config configs\finetune_ds009999.yaml --set "finetune.fusion='eeg_only'" --set "finetune.contrastive_checkpoint_path=''" --set "finetune.eeg_baseline.enabled=true" --set "finetune.eeg_baseline.model_name='eegnet'" --set "finetune.eeg_baseline.load_pretrained_weights=false" --set "finetune.eeg_baseline.checkpoint_path=''"
+```
+
+例如，在 `ds009999` 上运行 `SVM`：
+
+```powershell
+python run_finetune.py --config configs\finetune_ds009999.yaml --force-cpu --set "finetune.fusion='eeg_only'" --set "finetune.contrastive_checkpoint_path=''" --set "finetune.eeg_baseline.enabled=true" --set "finetune.eeg_baseline.model_name='svm'" --set "finetune.eeg_baseline.load_pretrained_weights=false" --set "finetune.eeg_baseline.checkpoint_path=''"
+```
+
+如果要运行 foundation baseline，例如 `LaBraM`，可以再补：
+
+```powershell
+--set "finetune.eeg_baseline.model_name='labram'" --set "finetune.eeg_baseline.load_pretrained_weights=true" --set "finetune.eeg_baseline.checkpoint_path='pretrained_weights\\labram.pth'"
+```
+
+### 12. LOSO 全折微调 ds009999
 
 先预处理生成 `cache\ds009999\loso_subjectwise\fold_*`，然后对每个 fold 调用 `run_finetune.py`。单个 fold 的调用格式如下：
 
@@ -222,13 +268,13 @@ python run_finetune.py --config configs\finetune_ds009999.yaml
 python run_finetune.py --config configs\finetune_ds009999.yaml --train-manifest cache\ds009999\loso_subjectwise\fold_ds009999_sub01\manifest_train.csv --val-manifest cache\ds009999\loso_subjectwise\fold_ds009999_sub01\manifest_val.csv --test-manifest cache\ds009999\loso_subjectwise\fold_ds009999_sub01\manifest_test.csv --root-dir cache\ds009999 --output-dir outputs\ds009999\finetune\fold_ds009999_sub01
 ```
 
-### 12. Optuna 搜索 ds002338
+### 13. Optuna 搜索 ds002338
 
 ```powershell
 python run_optuna_search.py --study-config configs\optuna_ds002338.yaml --mode full
 ```
 
-### 13. Optuna 搜索 ds009999
+### 14. Optuna 搜索 ds009999
 
 `ds009999` 只支持 finetune-only：
 
@@ -236,7 +282,7 @@ python run_optuna_search.py --study-config configs\optuna_ds002338.yaml --mode f
 python run_optuna_search.py --study-config configs\optuna_ds009999.yaml --mode finetune_only
 ```
 
-### 14. 预训练结果离线可视化
+### 15. 预训练结果离线可视化
 
 ```powershell
 python .\run_visualize_contrastive.py --config configs\train_joint_contrastive.yaml --checkpoint outputs\joint_contrastive\contrastive\checkpoints\best.pth --output-dir outputs\visualizations\contrastive --batch-size 32 --tsne-max-points 2000 --heatmap-max-points 128
@@ -313,25 +359,51 @@ python run_finetune.py --config configs/finetune_ds002338.yaml
 python run_finetune.py --config configs/finetune_ds009999.yaml
 ```
 
-### 11. LOSO 单 fold 微调 ds009999
+### 11. 运行 EEG baseline
+
+例如，在 `ds009999` 上运行 `EEGNet`：
+
+```bash
+python run_finetune.py --config configs/finetune_ds009999.yaml --set "finetune.fusion='eeg_only'" --set "finetune.contrastive_checkpoint_path=''" --set "finetune.eeg_baseline.enabled=true" --set "finetune.eeg_baseline.model_name='eegnet'" --set "finetune.eeg_baseline.load_pretrained_weights=false" --set "finetune.eeg_baseline.checkpoint_path=''"
+```
+
+例如，在 `ds009999` 上运行 `SVM`：
+
+```bash
+python run_finetune.py --config configs/finetune_ds009999.yaml --force-cpu --set "finetune.fusion='eeg_only'" --set "finetune.contrastive_checkpoint_path=''" --set "finetune.eeg_baseline.enabled=true" --set "finetune.eeg_baseline.model_name='svm'" --set "finetune.eeg_baseline.load_pretrained_weights=false" --set "finetune.eeg_baseline.checkpoint_path=''"
+```
+
+例如，在 `ds002336` 上批量跑全部 LOSO EEG baselines：
+
+```bash
+./scripts_linux/run_all_eeg_baselines.sh --config configs/finetune_ds002336.yaml --models svm,labram,cbramod,eeg_deformer,eegnet,conformer,tsception --output-root outputs/finetune_ds002336_all_baselines
+```
+
+如果要运行 foundation baseline，例如 `LaBraM`，可以再补：
+
+```bash
+--set "finetune.eeg_baseline.model_name='labram'" --set "finetune.eeg_baseline.load_pretrained_weights=true" --set "finetune.eeg_baseline.checkpoint_path='pretrained_weights/labram.pth'"
+```
+
+### 12. LOSO 单 fold 微调 ds009999
 
 ```bash
 python run_finetune.py --config configs/finetune_ds009999.yaml --train-manifest cache/ds009999/loso_subjectwise/fold_ds009999_sub01/manifest_train.csv --val-manifest cache/ds009999/loso_subjectwise/fold_ds009999_sub01/manifest_val.csv --test-manifest cache/ds009999/loso_subjectwise/fold_ds009999_sub01/manifest_test.csv --root-dir cache/ds009999 --output-dir outputs/ds009999/finetune/fold_ds009999_sub01
 ```
 
-### 12. Optuna 搜索 ds002338
+### 13. Optuna 搜索 ds002338
 
 ```bash
 python run_optuna_search.py --study-config configs/optuna_ds002338_linux.yaml --mode full
 ```
 
-### 13. Optuna 搜索 ds009999
+### 14. Optuna 搜索 ds009999
 
 ```bash
 python run_optuna_search.py --study-config configs/optuna_ds009999_linux.yaml --mode finetune_only
 ```
 
-### 14. 预训练结果离线可视化
+### 15. 预训练结果离线可视化
 
 ```bash
 python run_visualize_contrastive.py --config configs/train_joint_contrastive.yaml --checkpoint outputs/joint_contrastive/contrastive/checkpoints/best.pth --output-dir outputs/visualizations/contrastive --batch-size 32 --tsne-max-points 2000 --heatmap-max-points 128
@@ -353,10 +425,13 @@ python run_visualize_contrastive.py --config configs/train_joint_contrastive.yam
 - `checkpoints/best.pth`
 - `val_metrics.json`
 - `test_metrics.json`
+- `svm_summary.json`（仅 `svm` baseline）
 
 LOSO 汇总一般写到：
 
 - `loso_finetune_summary.csv`
+- `baseline_summary.csv`（单个 baseline 的全 fold 汇总）
+- `all_baselines_summary.csv`（批量 baseline 的总汇总，Linux 脚本生成）
 
 ### 3. 可视化
 

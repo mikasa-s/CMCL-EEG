@@ -13,9 +13,9 @@ data:
   test_manifest_csv: cache/ds002739/loso_subjectwise/fold_ds002739_sub01/manifest_test.csv
   root_dir: cache/ds002739
   preload_dataset: false
-  eeg_channel_subset: auto
+  eeg_channel_subset: none
   eeg_channel_target_manifest: cache/ds002739/eeg_channels_target.csv
-  expected_eeg_shape: [40, 4, 200]
+  expected_eeg_shape: [53, 4, 200]
   expected_fmri_shape: [48, 48, 48, 1]
   normalize_eeg: true
   normalize_fmri: true
@@ -70,7 +70,7 @@ finetune:
     enabled: false
     model_name: cbramod
     num_classes: 2
-    num_channels: 40
+    num_channels: 53
     num_timepoints: 800
     load_pretrained_weights: false
     checkpoint_path: ""

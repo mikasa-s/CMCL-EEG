@@ -36,6 +36,13 @@ from preprocess_common import (
     write_subject_memmap_pack,
 )
 
+DS002739_JOINT_EXCLUDED_RUNS = {
+    ("sub-05", "run-02"),
+    ("sub-14", "run-01"),
+    ("sub-14", "run-02"),
+    ("sub-15", "run-02"),
+}
+
 
 @dataclass(frozen=True)
 class ContrastiveSampleRecord:
@@ -178,6 +185,13 @@ def slice_single_tr_fmri(series: np.ndarray, tr_index: int, fmri_mode: str) -> n
     if tr_index < 0 or tr_index >= series.shape[3]:
         raise ValueError(f"fMRI volume TR index out of range: {tr_index} for {series.shape}")
     return series[:, :, :, tr_index : tr_index + 1].astype(np.float32)
+
+
+def event_onset_to_tr_index(onset_sec: float, tr: float, total_trs: int) -> int:
+    tr_index = int(np.floor(float(onset_sec) / float(tr) + 1e-8))
+    if tr_index < 0 or tr_index >= int(total_trs):
+        raise ValueError(f"Event onset {onset_sec} sec maps to invalid TR index {tr_index} for total_trs={total_trs}")
+    return tr_index
 
 
 def build_joint_sample_record(
@@ -767,6 +781,8 @@ def main() -> None:
                 func_dir = ds_root / original_subject / "func"
                 eeg_dir = ds_root / original_subject / "EEG"
                 for run in get_run_ids(func_dir, args.ds002739_runs):
+                    if (original_subject, run) in DS002739_JOINT_EXCLUDED_RUNS:
+                        continue
                     bold_path = func_dir / f"{original_subject}_task-main_{run}_bold.nii.gz"
                     fmri_events_path = func_dir / f"{original_subject}_task-main_{run}_events.tsv"
                     eeg_data_path = eeg_dir / f"EEG_data_{original_subject}_{run}.mat"
@@ -788,9 +804,7 @@ def main() -> None:
                     pair_count = min(len(eeg_trials), len(fmri_events))
                     eeg_trials = eeg_trials.iloc[:pair_count].reset_index(drop=True)
                     fmri_events = fmri_events.iloc[:pair_count].reset_index(drop=True)
-                    eeg_fmri_offset_sec = float(np.median(
-                        eeg_trials["eeg_onset_sec"].to_numpy(dtype=np.float64) - fmri_events["onset"].to_numpy(dtype=np.float64)
-                    ))
+                    eeg_protocol_start_sec = float(eeg_trials.iloc[0]["eeg_onset_sec"]) - float(fmri_events.iloc[0]["onset"])
 
                     if args.fmri_mode == "roi":
                         fmri_source, _, _ = extract_roi_timeseries(
@@ -817,7 +831,7 @@ def main() -> None:
                     exported_pairs = 0
                     for tr_index in range(total_trs):
                         anchor_sec = float(tr_index) * float(args.tr)
-                        eeg_window_end_sec = anchor_sec + eeg_fmri_offset_sec
+                        eeg_window_end_sec = float(eeg_protocol_start_sec) + anchor_sec
                         eeg_window_start_sec = eeg_window_end_sec - float(args.eeg_window_sec)
                         try:
                             eeg_window = slice_eeg_window(eeg_data, sfreq=processed_sfreq, end_sec=eeg_window_end_sec, duration_sec=float(args.eeg_window_sec))
@@ -877,7 +891,7 @@ def main() -> None:
                             fmri_shape="x".join(str(dim) for dim in fmri_source.shape),
                             eeg_sfreq_hz=processed_sfreq,
                             fmri_target_tr_sec=float(args.tr),
-                            eeg_fmri_offset_sec=eeg_fmri_offset_sec,
+                            eeg_fmri_offset_sec=float(eeg_protocol_start_sec),
                             candidate_trs=total_trs,
                             exported_pairs=exported_pairs,
                         )
