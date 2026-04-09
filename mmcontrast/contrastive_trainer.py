@@ -13,9 +13,9 @@ from torch.utils.data import DataLoader, DistributedSampler
 
 from .datasets import PairedEEGfMRIDataset
 from .distributed import cleanup_distributed, configure_cudnn, configure_runtime_devices, gather_tensor, init_distributed, is_dist_initialized, is_main_process, runtime_summary
-from .losses import SharedPrivatePretrainLoss
+from .losses import DCCAPretrainLoss, PureInfoNCEPretrainLoss, SharedPrivatePretrainLoss
 from .metrics import contrastive_retrieval_metrics
-from .models import EEGfMRIContrastiveModel
+from .models import EEGfMRIContrastiveModel, EEGfMRISharedOnlyContrastiveModel
 
 
 def _build_grad_scaler(enabled: bool) -> torch.amp.GradScaler | torch.cuda.amp.GradScaler:
@@ -36,6 +36,7 @@ class ContrastiveTrainer:
 
         train_cfg = cfg["train"]
         data_cfg = cfg["data"]
+        self.pretrain_objective = str(train_cfg.get("pretrain_objective", "shared_private")).strip().lower()
 
         train_dataset = self.build_dataset(data_cfg, split="train")
         # 多卡时由 DistributedSampler 负责切分样本，避免重复读同一数据。
@@ -88,11 +89,23 @@ class ContrastiveTrainer:
                 find_unused_parameters=False,
             )
 
-        self.criterion = SharedPrivatePretrainLoss(
-            temperature=float(train_cfg.get("temperature", 0.07)),
-            band_power_weight=float(train_cfg.get("band_power_loss_weight", 1.0)),
-            separation_weight=float(train_cfg.get("separation_loss_weight", 0.1)),
-        )
+        if self.pretrain_objective == "shared_private":
+            self.criterion = SharedPrivatePretrainLoss(
+                temperature=float(train_cfg.get("temperature", 0.07)),
+                band_power_weight=float(train_cfg.get("band_power_loss_weight", 1.0)),
+                separation_weight=float(train_cfg.get("separation_loss_weight", 0.1)),
+            )
+        elif self.pretrain_objective == "infonce":
+            self.criterion = PureInfoNCEPretrainLoss(
+                temperature=float(train_cfg.get("temperature", 0.07)),
+            )
+        elif self.pretrain_objective == "dcca":
+            self.criterion = DCCAPretrainLoss(
+                reg=float(train_cfg.get("dcca_reg", 1e-4)),
+                eps=float(train_cfg.get("dcca_eps", 1e-9)),
+            )
+        else:
+            raise ValueError(f"Unsupported pretrain objective: {self.pretrain_objective}")
         self.optimizer = torch.optim.AdamW(
             self.model.parameters(),
             lr=float(train_cfg.get("lr", 1e-4)),
@@ -172,7 +185,7 @@ class ContrastiveTrainer:
         dataset_cfg.pop("test_manifest_csv", None)
         dataset_cfg.pop("expected_eeg_shape", None)
         dataset_cfg.pop("expected_fmri_shape", None)
-        dataset_cfg["require_band_power"] = True
+        dataset_cfg["require_band_power"] = self.pretrain_objective == "shared_private"
         return PairedEEGfMRIDataset(**dataset_cfg)
 
     def build_loader(self, dataset, batch_size: int, sampler=None, shuffle=False, drop_last=False, num_workers=4, pin_memory=True):
@@ -201,7 +214,9 @@ class ContrastiveTrainer:
         fmri_ckpt = str(model_cfg["fmri_model"].get("checkpoint_path", "")).strip()
         model_cfg["eeg_model"]["checkpoint_path"] = str(self.resolve_path(eeg_ckpt)) if eeg_ckpt else ""
         model_cfg["fmri_model"]["checkpoint_path"] = str(self.resolve_path(fmri_ckpt)) if fmri_ckpt else ""
-        return EEGfMRIContrastiveModel(model_cfg).to(self.device)
+        if self.pretrain_objective == "shared_private":
+            return EEGfMRIContrastiveModel(model_cfg).to(self.device)
+        return EEGfMRISharedOnlyContrastiveModel(model_cfg).to(self.device)
 
     def load_checkpoint(self, checkpoint_path: Path) -> None:
         """恢复模型、优化器和学习率调度器状态。"""
@@ -264,7 +279,7 @@ class ContrastiveTrainer:
         for step, batch in enumerate(self.train_loader, start=1):
             eeg = batch["eeg"].to(self.device, non_blocking=True)
             fmri = batch["fmri"].to(self.device, non_blocking=True)
-            band_power = batch["band_power"].to(self.device, non_blocking=True)
+            band_power = batch["band_power"].to(self.device, non_blocking=True) if self.pretrain_objective == "shared_private" else None
             self.optimizer.zero_grad(set_to_none=True)
             optimizer_stepped = False
 
@@ -273,13 +288,19 @@ class ContrastiveTrainer:
             autocast_ctx = torch.autocast(device_type=self.device.type, dtype=amp_dtype) if amp_enabled else nullcontext()
             with autocast_ctx:
                 out = self.model(eeg=eeg, fmri=fmri)
-                loss_dict = self.criterion(
-                    eeg_shared=out["eeg_embed"],
-                    fmri_shared=out["fmri_embed"],
-                    eeg_private=out["eeg_private"],
-                    band_power_pred=out["band_power_pred"],
-                    band_power_target=band_power,
-                )
+                if self.pretrain_objective == "shared_private":
+                    loss_dict = self.criterion(
+                        eeg_shared=out["eeg_embed"],
+                        fmri_shared=out["fmri_embed"],
+                        eeg_private=out["eeg_private"],
+                        band_power_pred=out["band_power_pred"],
+                        band_power_target=band_power,
+                    )
+                else:
+                    loss_dict = self.criterion(
+                        eeg_shared=out["eeg_embed"],
+                        fmri_shared=out["fmri_embed"],
+                    )
                 loss = loss_dict["loss"]
 
             if self.scaler.is_enabled():

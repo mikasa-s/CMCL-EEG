@@ -4,7 +4,7 @@ import inspect
 import torch
 import torch.nn as nn
 
-from .eeg_cbramod_adapter import EEGCBraModAdapter
+from .eeg_adapter import EEGCBraModAdapter
 from .fmri_adapter import FMRINeuroSTORMAdapter
 
 
@@ -68,6 +68,35 @@ class EEGSharedPrivateEncoder(nn.Module):
         if normalized_mode == "concat":
             return torch.cat((outputs["eeg_shared"], outputs["eeg_private"]), dim=-1)
         raise ValueError(f"Unsupported EEG classifier mode: {mode}")
+
+
+class EEGSharedEncoder(nn.Module):
+    def __init__(self, eeg_cfg: dict, head_cfg: dict | None = None) -> None:
+        super().__init__()
+        head_cfg = head_cfg or {}
+        valid_backbone_keys = inspect.signature(EEGCBraModAdapter.__init__).parameters
+        backbone_cfg = {key: value for key, value in eeg_cfg.items() if key in valid_backbone_keys}
+        self.backbone = EEGCBraModAdapter(**backbone_cfg)
+        backbone_dim = int(self.backbone.feature_dim)
+        self.shared_dim = int(eeg_cfg.get("shared_dim", head_cfg.get("shared_dim", 256)))
+        head_dropout = float(head_cfg.get("head_dropout", 0.0))
+
+        self.shared_head = LinearHead(backbone_dim, self.shared_dim, dropout=head_dropout)
+        self.feature_dim = self.shared_dim
+
+    def forward(self, eeg: torch.Tensor) -> dict[str, torch.Tensor]:
+        eeg_feat = self.backbone(eeg)
+        eeg_shared = self.shared_head(eeg_feat)
+        return {
+            "eeg_feat": eeg_feat,
+            "eeg_shared": eeg_shared,
+        }
+
+    def encode_for_finetune(self, eeg: torch.Tensor, mode: str = "shared") -> torch.Tensor:
+        normalized_mode = str(mode).strip().lower()
+        if normalized_mode != "shared":
+            raise ValueError("Shared-only EEG encoder only supports classifier_mode=shared")
+        return self.forward(eeg)["eeg_shared"]
 
 
 class FMRISharedEncoder(nn.Module):

@@ -23,6 +23,9 @@ conda activate <your-mamba-env>
 - 使用 EEG encoder 和 fMRI encoder 做跨模态对比学习
 - 当前预训练结构包含 `EEG shared head`、`EEG private head`、`fMRI shared head`
 - 预训练损失由 `InfoNCE(shared)`、`band-power regression(private)`、`shared/private separation loss` 组成
+- 额外支持两个最简单的跨模态 baseline：
+  - `Pure InfoNCE`：只保留 EEG shared encoder 和 fMRI encoder，只用 symmetric InfoNCE
+  - `DCCA`：只保留 EEG shared encoder 和 fMRI encoder，只用 DCCA correlation loss
 
 2. EEG-only 微调分类
 - 适用数据集：`ds002336`、`ds002338`、`ds002739`、`ds009999(SEED)`
@@ -183,6 +186,24 @@ finetune:
 - 当 `finetune.eeg_baseline.enabled=true` 时，常规的 contrastive checkpoint 不再是主路径；传统 baseline 会直接走自身分类分支
 - `labram` 依赖 `timm`，如果缺失需要额外安装
 
+### 6. Cross-Modal baseline 配置
+
+目前额外提供两个最简单的跨模态 baseline：
+
+- `train.pretrain_objective=infonce`
+- `train.pretrain_objective=dcca`
+
+它们都只保留 `EEG shared encoder + fMRI encoder`，不使用 `EEG private encoder`、`band-power loss`、`separation loss` 或其他额外损失。
+
+如果要把这类预训练权重用于 EEG-only 微调，需要额外设置：
+
+```yaml
+finetune:
+  fusion: eeg_only
+  eeg_encoder_variant: shared_only
+  classifier_mode: shared
+```
+
 ## Windows 操作指南
 
 ### 1. 环境安装
@@ -243,6 +264,18 @@ python preprocess\compute_eeg_band_power_targets.py --manifest-csv cache\joint_c
 python run_train.py --config configs\train_joint_contrastive.yaml
 ```
 
+Pure InfoNCE baseline：
+
+```powershell
+python run_train.py --config configs\train_joint_infonce.yaml
+```
+
+DCCA baseline：
+
+```powershell
+python run_train.py --config configs\train_joint_dcca.yaml
+```
+
 ### 9. 单 fold 微调 ds002338
 
 ```powershell
@@ -253,6 +286,12 @@ python run_finetune.py --config configs\finetune_ds002338.yaml
 
 ```powershell
 python run_finetune.py --config configs\finetune_ds009999.yaml
+```
+
+如果要评估 `Pure InfoNCE / DCCA` 预训练后的 EEG-only 微调，可在现有微调配置上追加：
+
+```powershell
+python run_finetune.py --config configs\finetune_ds009999.yaml --set "finetune.eeg_encoder_variant='shared_only'" --set "finetune.fusion='eeg_only'" --set "finetune.classifier_mode='shared'" --set "finetune.contrastive_checkpoint_path='path\\to\\best.pth'"
 ```
 
 ### 11. 运行单个 EEG baseline
@@ -378,6 +417,18 @@ python preprocess/compute_eeg_band_power_targets.py --manifest-csv cache/joint_c
 python run_train.py --config configs/train_joint_contrastive.yaml
 ```
 
+Pure InfoNCE baseline：
+
+```bash
+python run_train.py --config configs/train_joint_infonce.yaml
+```
+
+DCCA baseline：
+
+```bash
+python run_train.py --config configs/train_joint_dcca.yaml
+```
+
 ### 9. 单 fold 微调 ds002338
 
 ```bash
@@ -388,6 +439,12 @@ python run_finetune.py --config configs/finetune_ds002338.yaml
 
 ```bash
 python run_finetune.py --config configs/finetune_ds009999.yaml
+```
+
+如果要评估 `Pure InfoNCE / DCCA` 预训练后的 EEG-only 微调，可在现有微调配置上追加：
+
+```bash
+python run_finetune.py --config configs/finetune_ds009999.yaml --set "finetune.eeg_encoder_variant='shared_only'" --set "finetune.fusion='eeg_only'" --set "finetune.classifier_mode='shared'" --set "finetune.contrastive_checkpoint_path='path/to/best.pth'"
 ```
 
 ### 11. 运行 EEG baseline

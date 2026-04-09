@@ -70,3 +70,77 @@ class SharedPrivatePretrainLoss(torch.nn.Module):
             "band_power_loss": band_power,
             "separation_loss": separation,
         }
+
+
+class PureInfoNCEPretrainLoss(torch.nn.Module):
+    def __init__(self, temperature: float = 0.07) -> None:
+        super().__init__()
+        self.info_nce = SymmetricInfoNCELoss(temperature=temperature)
+
+    def forward(self, eeg_shared: torch.Tensor, fmri_shared: torch.Tensor) -> dict[str, torch.Tensor]:
+        contrastive = self.info_nce(eeg_shared, fmri_shared)
+        zero = contrastive.new_zeros(())
+        return {
+            "loss": contrastive,
+            "contrastive_loss": contrastive,
+            "band_power_loss": zero,
+            "separation_loss": zero,
+        }
+
+
+class DCCALoss(torch.nn.Module):
+    def __init__(self, reg: float = 1e-4, eps: float = 1e-9) -> None:
+        super().__init__()
+        self.reg = float(reg)
+        self.eps = float(eps)
+
+    def forward(self, view1: torch.Tensor, view2: torch.Tensor) -> torch.Tensor:
+        if view1.ndim != 2 or view2.ndim != 2:
+            raise ValueError("DCCA loss expects 2D feature tensors")
+        if view1.shape != view2.shape:
+            raise ValueError(f"DCCA views must have matching shapes, got {tuple(view1.shape)} and {tuple(view2.shape)}")
+
+        batch_size, feat_dim = view1.shape
+        if batch_size <= 1:
+            return view1.new_zeros(())
+
+        h1 = view1 - view1.mean(dim=0, keepdim=True)
+        h2 = view2 - view2.mean(dim=0, keepdim=True)
+
+        denom = float(max(batch_size - 1, 1))
+        sigma11 = (h1.t() @ h1) / denom
+        sigma22 = (h2.t() @ h2) / denom
+        sigma12 = (h1.t() @ h2) / denom
+
+        identity = torch.eye(feat_dim, device=view1.device, dtype=view1.dtype)
+        sigma11 = sigma11 + self.reg * identity
+        sigma22 = sigma22 + self.reg * identity
+
+        evals_11, evecs_11 = torch.linalg.eigh(sigma11)
+        evals_22, evecs_22 = torch.linalg.eigh(sigma22)
+        evals_11 = torch.clamp(evals_11, min=self.eps)
+        evals_22 = torch.clamp(evals_22, min=self.eps)
+
+        sigma11_inv_sqrt = evecs_11 @ torch.diag(evals_11.rsqrt()) @ evecs_11.t()
+        sigma22_inv_sqrt = evecs_22 @ torch.diag(evals_22.rsqrt()) @ evecs_22.t()
+
+        t_matrix = sigma11_inv_sqrt @ sigma12 @ sigma22_inv_sqrt
+        singular_values = torch.linalg.svdvals(t_matrix)
+        correlation = singular_values.sum()
+        return -correlation
+
+
+class DCCAPretrainLoss(torch.nn.Module):
+    def __init__(self, reg: float = 1e-4, eps: float = 1e-9) -> None:
+        super().__init__()
+        self.dcca = DCCALoss(reg=reg, eps=eps)
+
+    def forward(self, eeg_shared: torch.Tensor, fmri_shared: torch.Tensor) -> dict[str, torch.Tensor]:
+        correlation_loss = self.dcca(eeg_shared, fmri_shared)
+        zero = correlation_loss.new_zeros(())
+        return {
+            "loss": correlation_loss,
+            "contrastive_loss": correlation_loss,
+            "band_power_loss": zero,
+            "separation_loss": zero,
+        }

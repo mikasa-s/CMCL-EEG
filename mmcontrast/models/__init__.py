@@ -1,8 +1,8 @@
 """模型封装层导出。"""
 
 from ..baselines import EEGBaselineModel
-from .eeg_cbramod_adapter import EEGCBraModAdapter
+from .eeg_adapter import EEGCBraModAdapter
 from .fmri_adapter import FMRINeuroSTORMAdapter
 from .classifier import EEGfMRIClassifier
-from .multimodal_model import EEGfMRIContrastiveModel
-from .shared_private import EEGSharedPrivateEncoder, FMRISharedEncoder
+from .multimodal_model import EEGfMRIContrastiveModel, EEGfMRISharedOnlyContrastiveModel
+from .shared_private import EEGSharedEncoder, EEGSharedPrivateEncoder, FMRISharedEncoder

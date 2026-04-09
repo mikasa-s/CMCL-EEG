@@ -260,6 +260,7 @@ class TrainConfig:
         eeg_cfg = self.section("eeg_model")
         fmri_cfg = self.section("fmri_model")
         train_cfg = self.section("train")
+        pretrain_objective = str(train_cfg.get("pretrain_objective", "shared_private")).strip().lower()
         eeg_shared_dim = int(eeg_cfg.get("shared_dim", train_cfg.get("projection_dim", 256)))
         eeg_private_dim = int(eeg_cfg.get("private_dim", eeg_shared_dim))
         eeg_band_power_dim = int(eeg_cfg.get("band_power_dim", 5))
@@ -270,9 +271,11 @@ class TrainConfig:
             if section_name not in self.raw:
                 raise ValueError(f"Missing required config section: {section_name}")
 
+        if pretrain_objective not in {"shared_private", "infonce", "dcca"}:
+            raise ValueError("train.pretrain_objective must be one of: shared_private, infonce, dcca")
         if eeg_shared_dim <= 0 or eeg_private_dim <= 0:
             raise ValueError("eeg_model.shared_dim and eeg_model.private_dim must be positive")
-        if eeg_band_power_dim != 5:
+        if pretrain_objective == "shared_private" and eeg_band_power_dim != 5:
             raise ValueError("eeg_model.band_power_dim must be 5 for the fixed EEG band-power target")
         if fmri_shared_dim != eeg_shared_dim:
             raise ValueError("fmri_model.shared_dim must match eeg_model.shared_dim for shared InfoNCE")
@@ -303,9 +306,14 @@ class TrainConfig:
 
         if "finetune" in self.raw:
             finetune_cfg = self.section("finetune")
+            eeg_encoder_variant = str(finetune_cfg.get("eeg_encoder_variant", "shared_private")).strip().lower()
+            if eeg_encoder_variant not in {"shared_private", "shared_only"}:
+                raise ValueError("finetune.eeg_encoder_variant must be one of: shared_private, shared_only")
             classifier_mode = str(finetune_cfg.get("classifier_mode", "concat")).strip().lower()
             if classifier_mode not in {"shared", "private", "concat", "add"}:
                 raise ValueError("finetune.classifier_mode must be one of: shared, private, concat, add")
+            if eeg_encoder_variant == "shared_only" and classifier_mode != "shared":
+                raise ValueError("finetune.eeg_encoder_variant=shared_only requires finetune.classifier_mode=shared")
             visualization_cfg = finetune_cfg.get("visualization", {}) or {}
             train_curve_cfg = visualization_cfg.get("train_curve", {}) or {}
             if "enabled" in train_curve_cfg and not isinstance(train_curve_cfg.get("enabled"), bool):

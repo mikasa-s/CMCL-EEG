@@ -9,7 +9,7 @@ from ..checkpoint_utils import extract_state_dict, filter_compatible_state_dict,
 from .eeg_channel_summary import build_eeg_channel_summary
 from .fmri_adapter import FMRINeuroSTORMAdapter
 from .multimodal_model import EEGfMRIContrastiveModel
-from .shared_private import EEGSharedPrivateEncoder
+from .shared_private import EEGSharedEncoder, EEGSharedPrivateEncoder
 
 
 class EEGfMRIClassifier(nn.Module):
@@ -38,8 +38,13 @@ class EEGfMRIClassifier(nn.Module):
 
         self.fusion = str(finetune_cfg.get("fusion", "eeg_only")).strip().lower()
         self.classifier_mode = str(finetune_cfg.get("classifier_mode", "concat")).strip().lower()
+        self.eeg_encoder_variant = str(finetune_cfg.get("eeg_encoder_variant", "shared_private")).strip().lower()
         if self.classifier_mode not in {"shared", "private", "concat", "add"}:
             raise ValueError("finetune.classifier_mode must be one of: shared, private, concat, add")
+        if self.eeg_encoder_variant not in {"shared_private", "shared_only"}:
+            raise ValueError("finetune.eeg_encoder_variant must be one of: shared_private, shared_only")
+        if self.eeg_encoder_variant == "shared_only" and self.classifier_mode != "shared":
+            raise ValueError("finetune.eeg_encoder_variant=shared_only requires finetune.classifier_mode=shared")
         baseline_cfg = dict(finetune_cfg.get("eeg_baseline", {}))
         self.use_eeg_baseline = bool(baseline_cfg.get("enabled", False)) and self.fusion != "fmri_only"
         self.baseline_outputs_logits = False
@@ -120,10 +125,16 @@ class EEGfMRIClassifier(nn.Module):
             self.initialization_summary = " ".join(summary_parts)
         else:
             if self.fusion == "eeg_only":
-                self.eeg_encoder = EEGSharedPrivateEncoder(
-                    eeg_cfg,
-                    head_cfg={"head_dropout": float(finetune_cfg.get("head_dropout", 0.0))},
-                )
+                if self.eeg_encoder_variant == "shared_only":
+                    self.eeg_encoder = EEGSharedEncoder(
+                        eeg_cfg,
+                        head_cfg={"head_dropout": float(finetune_cfg.get("head_dropout", 0.0))},
+                    )
+                else:
+                    self.eeg_encoder = EEGSharedPrivateEncoder(
+                        eeg_cfg,
+                        head_cfg={"head_dropout": float(finetune_cfg.get("head_dropout", 0.0))},
+                    )
                 if checkpoint_path:
                     loaded_count = self._load_submodule_checkpoint(
                         self.eeg_encoder,
@@ -145,7 +156,10 @@ class EEGfMRIClassifier(nn.Module):
                     )
                 if eeg_channel_summary:
                     self.initialization_summary = f"{self.initialization_summary} {eeg_channel_summary}"
-                self.initialization_summary = f"{self.initialization_summary} classifier_mode={self.classifier_mode}."
+                self.initialization_summary = (
+                    f"{self.initialization_summary} classifier_mode={self.classifier_mode}, "
+                    f"eeg_encoder_variant={self.eeg_encoder_variant}."
+                )
             elif self.fusion == "fmri_only":
                 self.fmri_encoder = FMRINeuroSTORMAdapter(**fmri_cfg)
                 if checkpoint_path:
