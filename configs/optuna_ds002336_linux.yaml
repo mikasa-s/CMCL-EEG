@@ -2,7 +2,7 @@ study:
   name: optuna_ds002336
   default_mode: full
   direction: maximize
-  n_trials: 20
+  n_trials: 30
   output_dir: outputs/optuna/ds002336
   command:
     - bash
@@ -23,14 +23,14 @@ runtime_configs:
 metric:
   type: csv
   path: finetune/loso_finetune_summary.csv
-  column: macro_f1
+  column: accuracy
   row_filter:
     fold: CROSS_FOLD_MEAN_STD
 
 parameters:
   train_epochs:
     suggest: categorical
-    choices: [100]
+    choices: [80, 100, 150] #50, 80, 100
     target: config
     config_updates:
       - config: train
@@ -40,7 +40,7 @@ parameters:
 
   pretrain_batch_size:
     suggest: categorical
-    choices: [16, 32, 64, 128]
+    choices: [512] 
     target: config
     config_updates:
       - config: train
@@ -50,7 +50,7 @@ parameters:
 
   finetune_batch_size:
     suggest: categorical
-    choices: [16, 32, 64, 128]
+    choices: [32, 64, 128, 256]
     target: config
     config_updates:
       - config: finetune
@@ -60,8 +60,8 @@ parameters:
 
   pretrain_lr:
     suggest: float
-    low: 1e-5
-    high: 1e-3
+    low: 1e-4
+    high: 1e-4
     log: true
     target: config
     config_updates:
@@ -70,8 +70,8 @@ parameters:
 
   finetune_lr:
     suggest: float
-    low: 1e-5
-    high: 1e-3
+    low: 1e-6
+    high: 1e-4
     log: true
     target: config
     config_updates:
@@ -92,7 +92,7 @@ parameters:
 
   min_lr:
     suggest: float
-    low: 1e-7
+    low: 5e-5
     high: 1e-4
     log: true
     target: config
@@ -104,7 +104,7 @@ parameters:
 
   hidden_dim:
     suggest: categorical
-    choices: [128, 256, 512]
+    choices: [64, 128, 256, 512]
     target: config
     config_updates:
       - config: finetune
@@ -127,18 +127,35 @@ parameters:
     config_updates:
       - config: finetune
         key: finetune.early_stop_patience
+        
+  n_layer:
+    suggest: categorical
+    choices: [1, 2, 4, 6, 12]
+    target: config
+    config_updates:
+      - config: finetune
+        key: eeg_model.n_layer
+      
+  dropout:
+    suggest: categorical
+    choices: [0.1, 0.2, 0.3, 0.5]
+    target: config
+    config_updates:
+      - config: finetune
+        key: finetune.dropout
+
 
 parameter_groups:
-  pretrain: [pretrain_batch_size, pretrain_lr]
-  finetune: [finetune_batch_size, finetune_lr]
+  pretrain: [pretrain_lr]
+  finetune: [finetune_lr, dropout]
   # pretrain: [train_epochs, batch_size, lr, weight_decay, min_lr, grad_clip]
-  # finetune: [train_epochs, batch_size, lr, weight_decay, min_lr, hidden_dim, grad_clip, early_stop_patience]
+  finetune: [finetune_batch_size]
 
 modes:
   full:
     study_name: optuna_ds002336_full
     output_dir: outputs/optuna/ds002336_full
-    parameter_groups: [pretrain, finetune]
+    parameter_groups: [pretrain, finetune, weight_decay]
 
   finetune_only:
     study_name: optuna_ds002336_finetune_only

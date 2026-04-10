@@ -5,23 +5,21 @@ study:
   n_trials: 20
   output_dir: outputs/optuna/ds009999
   command:
-    - powershell
-    - -ExecutionPolicy
-    - Bypass
-    - -File
-    - scripts/run_finetune_ds009999.ps1
+    - python
+    - run_finetune.py
   static_args:
-    - -CacheRoot
+    - --loso
+    - --root-dir
     - cache/ds009999
-  output_arg: -OutputRoot
+  output_arg: --output-dir
 
 runtime_configs:
   finetune_base: configs/finetune_ds009999.yaml
-  finetune_arg: -FinetuneConfig
+  finetune_arg: --config
 
 metric:
   type: csv
-  path: finetune/loso_finetune_summary.csv
+  path: loso_finetune_summary.csv
   column: macro_f1
   row_filter:
     fold: CROSS_FOLD_MEAN_STD

@@ -29,7 +29,7 @@ conda activate <your-mamba-env>
 
 2. EEG-only 微调分类
 - 适用数据集：`ds002336`、`ds002338`、`ds002739`、`ds009999(SEED)`
-- 支持 `classifier_mode=shared|private|concat`
+- 支持 `classifier_mode=shared|private|concat|add`
 - 默认 `classifier_mode=concat`
 - 支持 `finetune.eeg_baseline` 切换到 EEG baseline
 - 当前支持的 baseline：
@@ -322,6 +322,13 @@ python run_finetune.py --config configs\finetune_ds009999.yaml --force-cpu --set
 python run_finetune.py --config configs\finetune_ds009999.yaml --loso --root-dir cache\ds009999 --output-dir outputs\ds009999\finetune
 ```
 
+`run_finetune.py` 现在就是完整 LOSO 入口：
+
+- 不加 `--loso`：按当前 config 跑单 fold
+- 加 `--loso`：自动遍历 `<root_dir>\loso_subjectwise\fold_*`，并在输出目录下生成 `loso_finetune_summary.csv`
+- 如需自定义 LOSO 划分目录，可额外传 `--split-root`
+- 因此 `ds009999` 的常规微调和 Optuna 微调都直接推荐使用 `run_finetune.py`
+
 ### 13. 混淆矩阵
 
 `run_finetune.py` 只要拿到了 `test_manifest`，测试阶段就会自动输出混淆矩阵，不需要额外参数。最小用法：
@@ -479,6 +486,13 @@ python run_finetune.py --config configs/finetune_ds009999.yaml --force-cpu --set
 python run_finetune.py --config configs/finetune_ds009999.yaml --loso --root-dir cache/ds009999 --output-dir outputs/ds009999/finetune
 ```
 
+`run_finetune.py` 现在就是完整 LOSO 入口：
+
+- 不加 `--loso`：按当前 config 跑单 fold
+- 加 `--loso`：自动遍历 `<root_dir>/loso_subjectwise/fold_*`，并在输出目录下生成 `loso_finetune_summary.csv`
+- 如需自定义 LOSO 划分目录，可额外传 `--split-root`
+- 因此 `ds009999` 的常规微调和 Optuna 微调都直接推荐使用 `run_finetune.py`
+
 ### 13. 混淆矩阵
 
 `run_finetune.py` 只要拿到了 `test_manifest`，测试阶段就会自动输出混淆矩阵，不需要额外参数。最小用法：
@@ -528,6 +542,8 @@ python run_train.py --config configs/train_joint_contrastive.yaml
 `run_finetune.py`
 
 ```bash
+python run_finetune.py --config configs/finetune_ds002338.yaml
+python run_finetune.py --config configs/finetune_ds009999.yaml --loso --root-dir cache/ds009999 --output-dir outputs/ds009999/finetune
 ```
 
 `run_optuna_search.py`
@@ -588,17 +604,18 @@ python run_visualize_contrastive.py --config configs/train_joint_contrastive.yam
 ./scripts_linux/run_pretrain_and_finetune.sh --target-dataset ds002739 --joint-train-config configs/train_joint_contrastive.yaml --ds002739-finetune-config configs/finetune_ds002739.yaml
 ```
 
+说明：该脚本当前只负责串联“预训练 + 目标数据集预处理 + 调用 `run_finetune.py --loso`”，不再自己循环各个 fold。
+
 `scripts_linux/run_optuna_pretrain_and_finetune.sh`
 
 ```bash
 ./scripts_linux/run_optuna_pretrain_and_finetune.sh --target-dataset ds002739 --finetune-config configs/finetune_ds002739.yaml --output-root outputs/optuna_run
 ```
 
-`scripts_linux/run_finetune_ds009999.sh`
+说明：该脚本面向 `ds002336/ds002338/ds002739` 这类 joint-pretrain 体系下的数据集，不用于 `ds009999`。
 
-```bash
-./scripts_linux/run_finetune_ds009999.sh --finetune-config configs/finetune_ds009999.yaml --cache-root cache/ds009999 --output-root outputs/ds009999
-```
+
+说明：这是 `run_finetune.py --loso` 的便捷封装，不是必需入口。
 
 
 ```bash
@@ -657,17 +674,18 @@ python run_visualize_contrastive.py --config configs/train_joint_contrastive.yam
 .\scripts\run_pretrain_and_finetune.ps1 -TargetDataset ds002739 -JointTrainConfig configs\train_joint_contrastive.yaml -Ds002739FinetuneConfig configs\finetune_ds002739.yaml
 ```
 
+说明：该脚本当前只负责串联“预训练 + 目标数据集预处理 + 调用 `run_finetune.py --loso`”，不再自己循环各个 fold。
+
 `scripts/run_optuna_pretrain_and_finetune.ps1`
 
 ```powershell
 .\scripts\run_optuna_pretrain_and_finetune.ps1 -TargetDataset ds002739 -FinetuneConfig configs\finetune_ds002739.yaml -OutputRoot outputs\optuna_run
 ```
 
-`scripts/run_finetune_ds009999.ps1`
+说明：该脚本面向 `ds002336/ds002338/ds002739` 这类 joint-pretrain 体系下的数据集，不用于 `ds009999`。
 
-```powershell
-.\scripts\run_finetune_ds009999.ps1 -FinetuneConfig configs\finetune_ds009999.yaml -CacheRoot cache\ds009999 -OutputRoot outputs\ds009999
-```
+
+说明：这是 `run_finetune.py --loso` 的便捷封装，不是必需入口。
 
 
 ```powershell
@@ -687,6 +705,8 @@ python run_optuna_search.py --study-config configs\optuna_ds002338.yaml --mode f
 python run_optuna_search.py --study-config configs\optuna_ds009999.yaml --mode finetune_only
 ```
 
+说明：`ds009999` 的 Optuna 也是通过 `run_optuna_search.py` 启动，但现在直接调用 `run_finetune.py --loso`，不再依赖额外脚本封装。
+
 
 ```powershell
 ```
@@ -702,6 +722,8 @@ python run_optuna_search.py --study-config configs/optuna_ds002338_linux.yaml --
 ```bash
 python run_optuna_search.py --study-config configs/optuna_ds009999_linux.yaml --mode finetune_only
 ```
+
+说明：`ds009999` 的 Optuna 也是通过 `run_optuna_search.py` 启动，但现在直接调用 `run_finetune.py --loso`，不再依赖额外脚本封装。
 
 
 ```bash

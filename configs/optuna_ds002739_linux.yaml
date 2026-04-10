@@ -23,7 +23,7 @@ runtime_configs:
 metric:
   type: csv
   path: finetune/loso_finetune_summary.csv
-  column: macro_f1
+  column: accuracy
   row_filter:
     fold: CROSS_FOLD_MEAN_STD
 
@@ -70,8 +70,8 @@ parameters:
 
   finetune_lr:
     suggest: float
-    low: 1e-4
-    high: 1e-3
+    low: 1e-5
+    high: 1e-4
     log: true
     target: config
     config_updates:
@@ -93,7 +93,7 @@ parameters:
   min_lr:
     suggest: float
     low: 1e-7
-    high: 1e-4
+    high: 1e-5
     log: true
     target: config
     config_updates:
@@ -128,9 +128,25 @@ parameters:
       - config: finetune
         key: finetune.early_stop_patience
 
+  n_layer:
+    suggest: categorical
+    choices: [2, 4, 6]
+    target: config
+    config_updates:
+      - config: finetune
+        key: eeg_model.n_layer
+
+  dropout:
+    suggest: categorical
+    choices: [0.1, 0.2, 0.3, 0.5]
+    target: config
+    config_updates:
+      - config: finetune
+        key: finetune.dropout
+
 parameter_groups:
   pretrain: [train_epochs, pretrain_batch_size, pretrain_lr, weight_decay, min_lr, grad_clip]
-  finetune: [train_epochs, finetune_batch_size, finetune_lr, weight_decay, min_lr, hidden_dim, grad_clip, early_stop_patience]
+  finetune: [finetune_lr, weight_decay, min_lr, hidden_dim, n_layer]
 
 modes:
   full:
