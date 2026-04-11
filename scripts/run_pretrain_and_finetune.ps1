@@ -200,7 +200,7 @@ if (!$SkipPretrain) {
         Invoke-CommandOrThrow -Executable "powershell" -Args $jointPrepareArgs -StepName "joint preprocessing"
     }
 
-    $trainScript = (Join-Path $repoRoot "run_train.py")
+    $trainScript = (Join-Path $repoRoot "run_pretrain.py")
     $trainArgs = @(
         "--config", $JointTrainConfig,
         "--manifest", $jointManifestPath,

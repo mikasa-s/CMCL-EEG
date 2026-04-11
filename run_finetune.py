@@ -45,6 +45,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--eeg-baseline-load-pretrained", type=str, default="")
     parser.add_argument("--eeg-baseline-checkpoint", type=str, default="")
     parser.add_argument("--classifier-mode", type=str, default="")
+    parser.add_argument("--save-train-curve", action="store_true", help="Enable finetune train/val loss curve visualization.")
+    parser.add_argument("--train-curve-output-dir", type=str, default="", help="Optional output directory for finetune train curve artifacts.")
+    parser.add_argument("--save-confusion-matrix", action="store_true", help="Enable confusion matrix visualization during finetune evaluation/test.")
     parser.add_argument("--test-only", action="store_true")
     parser.add_argument("--force-cpu", action="store_true")
     parser.add_argument(
@@ -121,6 +124,12 @@ def apply_overrides(config: dict, args: argparse.Namespace) -> dict:
         assign_nested_value(config, "finetune.eeg_baseline.checkpoint_path", args.eeg_baseline_checkpoint.strip())
     if args.classifier_mode.strip():
         assign_nested_value(config, "finetune.classifier_mode", args.classifier_mode.strip())
+    if args.save_train_curve:
+        assign_nested_value(config, "finetune.visualization.train_curve.enabled", True)
+    if args.train_curve_output_dir.strip():
+        assign_nested_value(config, "finetune.visualization.train_curve.output_dir", args.train_curve_output_dir.strip())
+    if args.save_confusion_matrix:
+        assign_nested_value(config, "finetune.visualization.confusion_matrix.enabled", True)
 
     if args.force_cpu:
         assign_nested_value(config, "train.force_cpu", True)

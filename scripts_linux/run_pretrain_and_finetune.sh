@@ -271,9 +271,9 @@ if [[ "${SKIP_PRETRAIN}" != "true" ]]; then
 
     echo "Running joint contrastive pretraining..."
     if [[ "${USE_MULTI_GPU}" == "true" ]]; then
-        invoke_or_throw "joint pretraining" "${PYTHON}" -m torch.distributed.run --nproc_per_node "${GPU_COUNT}" "${REPO_ROOT}/run_train.py" "${train_args[@]}"
+        invoke_or_throw "joint pretraining" "${PYTHON}" -m torch.distributed.run --nproc_per_node "${GPU_COUNT}" "${REPO_ROOT}/run_pretrain.py" "${train_args[@]}"
     else
-        invoke_or_throw "joint pretraining" "${PYTHON}" "${REPO_ROOT}/run_train.py" "${train_args[@]}"
+        invoke_or_throw "joint pretraining" "${PYTHON}" "${REPO_ROOT}/run_pretrain.py" "${train_args[@]}"
     fi
 
     if [[ ! -f "${joint_training_checkpoint_path}" ]]; then

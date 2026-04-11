@@ -318,6 +318,9 @@ class TrainConfig:
             train_curve_cfg = visualization_cfg.get("train_curve", {}) or {}
             if "enabled" in train_curve_cfg and not isinstance(train_curve_cfg.get("enabled"), bool):
                 raise ValueError("finetune.visualization.train_curve.enabled must be a boolean")
+            confusion_matrix_cfg = visualization_cfg.get("confusion_matrix", {}) or {}
+            if "enabled" in confusion_matrix_cfg and not isinstance(confusion_matrix_cfg.get("enabled"), bool):
+                raise ValueError("finetune.visualization.confusion_matrix.enabled must be a boolean")
         for split_key in ["train_manifest_csv", "val_manifest_csv", "test_manifest_csv"]:
             split_value = data_cfg.get(split_key, "")
             split_path = "" if split_value is None else str(split_value).strip()

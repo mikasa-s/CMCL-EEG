@@ -84,3 +84,5 @@ finetune:
     train_curve:
       enabled: false
       output_dir: ""
+    confusion_matrix:
+      enabled: false

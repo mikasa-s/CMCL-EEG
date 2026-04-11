@@ -172,6 +172,8 @@ class FinetuneTrainer:
         visualization_cfg = finetune_cfg.get("visualization", {}) or {}
         train_curve_cfg = visualization_cfg.get("train_curve", {}) or {}
         self.enable_train_curve_visualization = bool(train_curve_cfg.get("enabled", False))
+        confusion_matrix_cfg = visualization_cfg.get("confusion_matrix", {}) or {}
+        self.enable_confusion_matrix_visualization = bool(confusion_matrix_cfg.get("enabled", False))
         visual_output_dir = str(train_curve_cfg.get("output_dir", "")).strip()
         self.train_curve_output_dir = self.resolve_path(visual_output_dir) if visual_output_dir else (self.output_dir / "visualizations")
         eval_ckpt = str(finetune_cfg.get("eval_checkpoint_path", "")).strip()
@@ -323,7 +325,7 @@ class FinetuneTrainer:
         return report
 
     def save_confusion_matrix_artifacts(self, split_name: str, logits: torch.Tensor, labels: torch.Tensor) -> None:
-        if not is_main_process():
+        if not is_main_process() or not self.enable_confusion_matrix_visualization:
             return
 
         logits_cpu = logits.detach().float().cpu()
