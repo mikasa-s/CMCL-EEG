@@ -260,6 +260,8 @@ def save_confusion_matrix(
     ax.set_yticklabels(class_names, fontsize=TICK_FONTSIZE)
     ax.tick_params(axis="both", labelsize=TICK_FONTSIZE)
 
+    annotation_fontsize = ANNOTATION_FONTSIZE + 2 if num_classes <= 2 else ANNOTATION_FONTSIZE
+
     for row in range(num_classes):
         for col in range(num_classes):
             value = display_matrix[row, col]
@@ -274,7 +276,7 @@ def save_confusion_matrix(
                 ha="center",
                 va="center",
                 color="white" if value > display_matrix.max() * 0.5 else "black",
-                fontsize=ANNOTATION_FONTSIZE,
+                fontsize=annotation_fontsize,
                 fontweight="semibold",
             )
             if value > display_matrix.max() * 0.5:
