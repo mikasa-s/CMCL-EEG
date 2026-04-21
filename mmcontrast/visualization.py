@@ -112,6 +112,94 @@ def save_embedding_groups_tsne(
     }
 
 
+def save_embedding_groups_pca(
+    embedding_groups: dict[str, torch.Tensor],
+    output_path: str | Path,
+    max_points: int = 200,
+    title: str = "PCA of Embedding Groups",
+    color_map: dict[str, str] | None = None,
+    basis: dict[str, np.ndarray] | None = None,
+) -> dict[str, Any]:
+    try:
+        import matplotlib.pyplot as plt
+    except ImportError as exc:
+        raise ModuleNotFoundError(
+            "Embedding visualization requires matplotlib."
+        ) from exc
+
+    normalized_groups: list[tuple[str, np.ndarray]] = []
+    for label, tensor in embedding_groups.items():
+        if tensor is None:
+            continue
+        group_np = _to_numpy(tensor, max_items=max_points)
+        if group_np.size == 0:
+            continue
+        normalized_groups.append((str(label), group_np))
+
+    if len(normalized_groups) < 2:
+        return {"saved": False, "reason": "not_enough_groups"}
+
+    features = [group_np for _, group_np in normalized_groups]
+    features_np = np.concatenate(features, axis=0)
+    if features_np.shape[0] < 3:
+        return {"saved": False, "reason": "not_enough_points"}
+
+    if basis is None:
+        centered = features_np - features_np.mean(axis=0, keepdims=True)
+        _, singular_values, vt = np.linalg.svd(centered, full_matrices=False)
+        components = vt[:2].astype(np.float32, copy=False)
+        mean = features_np.mean(axis=0).astype(np.float32, copy=False)
+        explained = (singular_values[:2] ** 2) / max(1e-12, np.sum(singular_values**2))
+    else:
+        mean = np.asarray(basis["mean"], dtype=np.float32)
+        components = np.asarray(basis["components"], dtype=np.float32)
+        explained = np.asarray(basis.get("explained_variance_ratio", np.zeros(2, dtype=np.float32)), dtype=np.float32)
+
+    coords = (features_np - mean[None, :]) @ components.T
+
+    palette = color_map or {
+        "EEG shared": "#1f77b4",
+        "EEG private": "#d62728",
+        "fMRI shared": "#2ca02c",
+    }
+    fallback_colors = ["#1f77b4", "#d62728", "#2ca02c", "#ff7f0e", "#9467bd", "#8c564b"]
+
+    output = Path(output_path)
+    _ensure_parent(output)
+    fig, ax = plt.subplots(figsize=(8, 7), dpi=160)
+    offset = 0
+    group_counts: dict[str, int] = {}
+    for group_index, (label, group_np) in enumerate(normalized_groups):
+        next_offset = offset + len(group_np)
+        color = palette.get(label, fallback_colors[group_index % len(fallback_colors)])
+        ax.scatter(coords[offset:next_offset, 0], coords[offset:next_offset, 1], s=18, alpha=0.75, label=label, c=color)
+        group_counts[label] = int(len(group_np))
+        offset = next_offset
+    ax.set_title(title, fontsize=TITLE_FONTSIZE)
+    x_label = "PC 1"
+    y_label = "PC 2"
+    if explained.shape[0] >= 2:
+        x_label = f"PC 1 ({float(explained[0]) * 100:.1f}%)"
+        y_label = f"PC 2 ({float(explained[1]) * 100:.1f}%)"
+    ax.set_xlabel(x_label, fontsize=LABEL_FONTSIZE)
+    ax.set_ylabel(y_label, fontsize=LABEL_FONTSIZE)
+    ax.tick_params(axis="both", labelsize=TICK_FONTSIZE)
+    ax.legend(frameon=False, fontsize=LEGEND_FONTSIZE)
+    fig.tight_layout()
+    fig.savefig(output, bbox_inches="tight")
+    plt.close(fig)
+    return {
+        "saved": True,
+        "path": str(output),
+        "group_counts": group_counts,
+        "basis": {
+            "mean": mean.tolist(),
+            "components": components.tolist(),
+            "explained_variance_ratio": explained.tolist(),
+        },
+    }
+
+
 def save_shared_private_tsne(
     eeg_shared: torch.Tensor,
     eeg_private: torch.Tensor,

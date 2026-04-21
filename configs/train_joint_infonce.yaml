@@ -1,5 +1,5 @@
 train:
-  output_dir: pretrained_weights/full/infonce
+  output_dir: pretrained_weights/pretrain_full/infonce
   force_cpu: false
   gpu_count: 1
   gpu_ids: [4]
@@ -23,6 +23,19 @@ train:
   eval_interval: 1
   resume_path: ""
   pretrain_objective: infonce
+  visualization:
+    online_monitor:
+      enabled: false
+      output_dir: ""
+      max_samples: 1000
+      train_max_samples: 0
+      train_max_samples_seed: 42
+      random_seed: 42
+      projection_method: pca
+      tsne_interval_epochs: 1
+      tsne_max_points: 1000
+      refresh_interval_sec: 10
+      update_interval_steps: 20
 
 data:
   manifest_csv: cache/joint_contrastive/manifest_all.csv

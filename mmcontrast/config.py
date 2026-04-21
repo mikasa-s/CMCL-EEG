@@ -279,6 +279,31 @@ class TrainConfig:
             raise ValueError("eeg_model.band_power_dim must be 5 for the fixed EEG band-power target")
         if fmri_shared_dim != eeg_shared_dim:
             raise ValueError("fmri_model.shared_dim must match eeg_model.shared_dim for shared InfoNCE")
+        train_visualization_cfg = train_cfg.get("visualization", {}) or {}
+        online_monitor_cfg = train_visualization_cfg.get("online_monitor", {}) or {}
+        if "enabled" in online_monitor_cfg and not isinstance(online_monitor_cfg.get("enabled"), bool):
+            raise ValueError("train.visualization.online_monitor.enabled must be a boolean")
+        projection_method = str(online_monitor_cfg.get("projection_method", "pca")).strip().lower()
+        if projection_method not in {"pca", "tsne"}:
+            raise ValueError("train.visualization.online_monitor.projection_method must be one of: pca, tsne")
+        for numeric_key in (
+            "max_samples",
+            "train_max_samples",
+            "train_max_samples_seed",
+            "random_seed",
+            "tsne_interval_epochs",
+            "tsne_max_points",
+            "refresh_interval_sec",
+            "update_interval_steps",
+            "batch_size",
+            "num_workers",
+        ):
+            if numeric_key in online_monitor_cfg and online_monitor_cfg.get(numeric_key) not in (None, ""):
+                int(online_monitor_cfg.get(numeric_key))
+        if "max_samples" in train_cfg and train_cfg.get("max_samples") not in (None, ""):
+            int(train_cfg.get("max_samples"))
+        if "max_samples_seed" in train_cfg and train_cfg.get("max_samples_seed") not in (None, ""):
+            int(train_cfg.get("max_samples_seed"))
 
         # 对比学习使用单一 manifest；微调仍使用 train/val/test manifests。
         manifest_value = str(data_cfg.get("manifest_csv", data_cfg.get("train_manifest_csv", "")))

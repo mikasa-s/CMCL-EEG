@@ -1,0 +1,800 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>CMCL-EEG Pretrain Console</title>
+  <style>
+    :root {
+      --bg: #eef5ff;
+      --bg-2: #f8fbff;
+      --panel: rgba(255, 255, 255, 0.8);
+      --panel-2: rgba(248, 251, 255, 0.92);
+      --line: rgba(120, 145, 188, 0.2);
+      --line-strong: rgba(47, 125, 246, 0.24);
+      --ink: #152033;
+      --muted: #607089;
+      --accent: #2f7df6;
+      --accent-2: #0fb5a7;
+      --danger: #e45c67;
+      --shadow: 0 24px 60px rgba(66, 99, 170, 0.12);
+      --radius: 22px;
+    }
+    * { box-sizing: border-box; }
+    html, body { height: 100%; }
+    body {
+      margin: 0;
+      color: var(--ink);
+      font-family: "Segoe UI Variable", "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+      background:
+        radial-gradient(circle at top left, rgba(47, 125, 246, 0.14), transparent 24%),
+        radial-gradient(circle at top right, rgba(15, 181, 167, 0.12), transparent 20%),
+        linear-gradient(180deg, #fbfdff 0%, #f3f7ff 48%, #eef5ff 100%);
+    }
+    .shell {
+      max-width: 1520px;
+      margin: 0 auto;
+      padding: 24px;
+    }
+    .hero {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-end;
+      gap: 24px;
+      margin-bottom: 20px;
+    }
+    .hero h1 {
+      margin: 0 0 8px 0;
+      font-size: 36px;
+      font-weight: 700;
+      letter-spacing: 0.02em;
+    }
+    .hero p {
+      margin: 0;
+      max-width: 820px;
+      color: var(--muted);
+      font-size: 14px;
+      line-height: 1.65;
+    }
+    .badges {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
+    .badge {
+      padding: 8px 12px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: rgba(47, 125, 246, 0.08);
+      color: #3166c9;
+      font-size: 12px;
+      letter-spacing: 0.03em;
+    }
+    .layout {
+      display: grid;
+      grid-template-columns: 360px minmax(0, 1fr);
+      gap: 18px;
+      align-items: start;
+    }
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(18px);
+    }
+    .sidebar {
+      padding: 18px;
+      position: sticky;
+      top: 18px;
+    }
+    .sidebar h2,
+    .content h2 {
+      margin: 0 0 14px 0;
+      font-size: 20px;
+      font-weight: 700;
+      letter-spacing: 0.01em;
+    }
+    .group {
+      padding: 14px;
+      margin-bottom: 12px;
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      background: linear-gradient(180deg, rgba(255, 255, 255, 0.92), rgba(245, 249, 255, 0.94));
+    }
+    .group-title {
+      margin: 0 0 12px 0;
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.1em;
+      color: #2f7df6;
+      text-transform: uppercase;
+    }
+    .field {
+      margin-bottom: 10px;
+    }
+    .field:last-child {
+      margin-bottom: 0;
+    }
+    label {
+      display: block;
+      margin-bottom: 6px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+    input, select, textarea {
+      width: 100%;
+      padding: 11px 12px;
+      border-radius: 14px;
+      border: 1px solid var(--line);
+      outline: none;
+      background: rgba(255, 255, 255, 0.92);
+      color: var(--ink);
+      font-size: 14px;
+      transition: border-color 0.15s ease, box-shadow 0.15s ease, background 0.15s ease;
+    }
+    input:focus, select:focus, textarea:focus {
+      border-color: var(--line-strong);
+      box-shadow: 0 0 0 4px rgba(88, 166, 255, 0.12);
+      background: rgba(255, 255, 255, 1);
+    }
+    textarea {
+      min-height: 86px;
+      resize: vertical;
+      font-family: "Cascadia Code", "Consolas", monospace;
+      line-height: 1.55;
+    }
+    .row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+    }
+    .inline-toggle {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      color: var(--muted);
+      font-size: 13px;
+      margin-top: 4px;
+    }
+    .inline-toggle input {
+      width: auto;
+      margin: 0;
+      accent-color: var(--accent);
+    }
+    .hint {
+      margin-top: 8px;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.6;
+    }
+    .actions {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+      margin-top: 8px;
+    }
+    button {
+      border: 0;
+      border-radius: 999px;
+      padding: 11px 16px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      color: #ffffff;
+      background: linear-gradient(135deg, #4d99ff, #2f7df6);
+      box-shadow: 0 10px 24px rgba(47, 125, 246, 0.24);
+      transition: transform 0.14s ease, box-shadow 0.14s ease, opacity 0.14s ease;
+    }
+    button:hover {
+      transform: translateY(-1px);
+      box-shadow: 0 14px 30px rgba(47, 125, 246, 0.28);
+    }
+    button.secondary {
+      color: #fff;
+      background: linear-gradient(135deg, #fb7185, #ef4444);
+      box-shadow: 0 10px 24px rgba(239, 68, 68, 0.28);
+    }
+    .content {
+      padding: 16px;
+    }
+    .status-strip {
+      display: grid;
+      grid-template-columns: 220px 1fr 1fr;
+      gap: 12px;
+      margin-bottom: 14px;
+    }
+    .status-card, .meta-card {
+      min-height: 90px;
+      padding: 14px;
+      border-radius: 18px;
+      border: 1px solid var(--line);
+      background: linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(244, 249, 255, 0.96));
+    }
+    .status-card .label,
+    .meta-card .label {
+      color: var(--muted);
+      font-size: 12px;
+      margin-bottom: 10px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+    .status-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 14px;
+      border-radius: 999px;
+      font-size: 20px;
+      font-weight: 700;
+      letter-spacing: 0.03em;
+    }
+    .status-chip.training {
+      background: rgba(15, 181, 167, 0.12);
+      color: #0f8f84;
+      border: 1px solid rgba(15, 181, 167, 0.2);
+    }
+    .status-chip.end {
+      background: rgba(120, 145, 188, 0.12);
+      color: #566b88;
+      border: 1px solid rgba(120, 145, 188, 0.18);
+    }
+    .dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: currentColor;
+      box-shadow: 0 0 14px currentColor;
+    }
+    .meta-value {
+      font-size: 16px;
+      font-weight: 600;
+      line-height: 1.45;
+      word-break: break-word;
+    }
+    .tabs {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 14px;
+    }
+    .tab {
+      padding: 9px 14px;
+      border-radius: 999px;
+      border: 1px solid var(--line);
+      background: rgba(255, 255, 255, 0.62);
+      color: var(--muted);
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .tab.active {
+      background: linear-gradient(135deg, rgba(47, 125, 246, 0.14), rgba(47, 125, 246, 0.06));
+      color: #225cc7;
+      border-color: rgba(47, 125, 246, 0.22);
+    }
+    .tab-panel { display: none; }
+    .tab-panel.active { display: block; }
+    iframe {
+      width: 100%;
+      min-height: 900px;
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      background: #fff;
+    }
+    details {
+      margin-bottom: 12px;
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      overflow: hidden;
+      background: rgba(255, 255, 255, 0.66);
+    }
+    summary {
+      padding: 12px 14px;
+      cursor: pointer;
+      list-style: none;
+      font-weight: 600;
+      color: #243650;
+    }
+    summary::-webkit-details-marker { display: none; }
+    .details-body { padding: 0 14px 14px 14px; }
+    pre {
+      margin: 0;
+      min-height: 220px;
+      max-height: 620px;
+      overflow: auto;
+      padding: 14px;
+      border-radius: 14px;
+      border: 1px solid rgba(148, 163, 184, 0.16);
+      background: rgba(245, 249, 255, 0.95);
+      color: #22324c;
+      font-size: 12px;
+      line-height: 1.55;
+      white-space: pre-wrap;
+      word-break: break-word;
+      font-family: "Cascadia Code", "Consolas", monospace;
+    }
+    .empty {
+      padding: 26px;
+      border: 1px dashed var(--line);
+      border-radius: 18px;
+      color: var(--muted);
+      background: rgba(255, 255, 255, 0.64);
+      text-align: center;
+      line-height: 1.7;
+    }
+    @media (max-width: 1180px) {
+      .layout { grid-template-columns: 1fr; }
+      .sidebar { position: static; }
+      .status-strip { grid-template-columns: 1fr 1fr; }
+      .status-card { grid-column: 1 / -1; }
+    }
+    @media (max-width: 760px) {
+      .shell { padding: 16px; }
+      .hero { display: block; }
+      .badges { margin-top: 12px; justify-content: flex-start; }
+      .row, .actions, .status-strip { grid-template-columns: 1fr; }
+      iframe { min-height: 720px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <div class="hero">
+      <div>
+        <h1>CMCL-EEG Pretrain Console</h1>
+        <p>本机网页前端。这里直接启动 <code>run_pretrain.py</code>，默认把监控样本数和训练样本数联动，主区域优先展示在线监控，不再堆一排低价值状态。</p>
+      </div>
+      <div class="badges">
+        <span class="badge">GitHub 风格深色界面</span>
+        <span class="badge">状态只保留 training / end</span>
+        <span class="badge">日志按需展开</span>
+      </div>
+    </div>
+
+    <div class="layout">
+      <div class="panel sidebar">
+        <h2>Run Setup</h2>
+
+        <div class="group">
+          <div class="group-title">Config</div>
+          <div class="field">
+            <label for="config">预训练配置</label>
+            <select id="config">
+              <option value="configs/train_joint_contrastive.yaml">configs/train_joint_contrastive.yaml</option>
+              <option value="configs/train_joint_infonce.yaml">configs/train_joint_infonce.yaml</option>
+              <option value="configs/train_joint_barlow_twins.yaml">configs/train_joint_barlow_twins.yaml</option>
+            </select>
+          </div>
+          <div class="row">
+            <div class="field">
+              <label for="pretrain_mode">预训练模式</label>
+              <select id="pretrain_mode">
+                <option value="full">full</option>
+                <option value="strict">strict</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="target_dataset">目标数据集</label>
+              <input id="target_dataset" value="ds002336" />
+            </div>
+          </div>
+          <div class="field">
+            <label for="held_out_subject">排除被试</label>
+            <input id="held_out_subject" placeholder="例如 ds002336_sub01；留空则按整数据集 strict" />
+          </div>
+        </div>
+
+        <div class="group">
+          <div class="group-title">Samples</div>
+          <div class="row">
+            <div class="field">
+              <label for="max_samples">监控样本数</label>
+              <input id="max_samples" type="number" value="1000" min="32" step="1" />
+            </div>
+            <div class="field">
+              <label for="train_max_samples">训练样本数上限</label>
+              <input id="train_max_samples" type="number" value="1000" min="0" step="1" />
+            </div>
+          </div>
+          <label class="inline-toggle">
+            <input id="lockTrainSamples" type="checkbox" checked />
+            训练样本数默认跟随监控样本数
+          </label>
+          <div class="row" style="margin-top: 10px;">
+            <div class="field">
+              <label for="tsne_max_points">t-SNE 最大点数</label>
+              <input id="tsne_max_points" type="number" value="1000" min="32" step="1" />
+            </div>
+            <div class="field">
+              <label for="tsne_interval_epochs">t-SNE 刷新间隔 epoch</label>
+              <input id="tsne_interval_epochs" type="number" value="1" min="1" step="1" />
+            </div>
+          </div>
+          <div class="field">
+            <label for="refresh_interval_sec">监控页轮询秒数</label>
+            <input id="refresh_interval_sec" type="number" value="10" min="2" step="1" />
+          </div>
+          <div class="field">
+            <label for="projection_method">投影方式</label>
+            <select id="projection_method">
+              <option value="pca">pca</option>
+              <option value="tsne">tsne</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="group">
+          <div class="group-title">Runtime</div>
+          <div class="field">
+            <label for="force_cpu">强制 CPU</label>
+            <select id="force_cpu">
+              <option value="false">false</option>
+              <option value="true">true</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="extra_set">附加 --set 参数</label>
+            <textarea id="extra_set" placeholder="train.epochs=5&#10;train.batch_size=64"></textarea>
+          </div>
+          <div class="hint">
+            页面会默认填入 `train.epochs=5` 和当前配置对应的 `train.batch_size`。如果你手动改过，就不会再被自动覆盖。
+          </div>
+        </div>
+
+        <div class="actions">
+          <button id="startBtn">Start</button>
+          <button id="stopBtn" class="secondary">Stop</button>
+        </div>
+      </div>
+
+      <div class="panel content">
+        <h2>Live Monitor</h2>
+
+        <div class="status-strip" id="statusStrip"></div>
+
+        <div class="tabs">
+          <button class="tab active" data-panel="monitorPanel">Monitor</button>
+          <button class="tab" data-panel="runtimePanel">Runtime</button>
+        </div>
+
+        <div id="monitorPanel" class="tab-panel active">
+          <iframe id="monitorFrame" src="about:blank"></iframe>
+        </div>
+
+        <div id="runtimePanel" class="tab-panel">
+          <details>
+            <summary>Command</summary>
+            <div class="details-body">
+              <pre id="commandBox"></pre>
+            </div>
+          </details>
+          <details>
+            <summary>Terminal Output</summary>
+            <div class="details-body">
+              <pre id="logBox"></pre>
+            </div>
+          </details>
+          <div class="empty">
+            这里只保留必要的排障信息。正常情况下，直接看 Monitor 面板即可，不需要盯终端输出。
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let configPresets = {};
+
+    async function fetchJSON(url, options) {
+      const response = await fetch(url, options);
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error || "Request failed");
+      return payload;
+    }
+
+    function splitExtraSet(text) {
+      return (text || "")
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter((line) => line.length > 0);
+    }
+
+    function syncTrainSamplesIfLocked() {
+      if (!document.getElementById("lockTrainSamples").checked) return;
+      document.getElementById("train_max_samples").value = document.getElementById("max_samples").value;
+    }
+
+    function bindTabs() {
+      const tabs = Array.from(document.querySelectorAll(".tab"));
+      tabs.forEach((tab) => {
+        tab.addEventListener("click", () => {
+          tabs.forEach((item) => item.classList.remove("active"));
+          document.querySelectorAll(".tab-panel").forEach((panel) => panel.classList.remove("active"));
+          tab.classList.add("active");
+          document.getElementById(tab.dataset.panel).classList.add("active");
+        });
+      });
+    }
+
+    function buildExtraSetTemplate(configPath) {
+      const preset = configPresets[configPath] || {};
+      const batchSize = Number(preset.batch_size || 128);
+      return "train.epochs=5\ntrain.batch_size=" + String(batchSize);
+    }
+
+    function applyExtraSetTemplate(force) {
+      const textarea = document.getElementById("extra_set");
+      if (!force && textarea.value.trim().length > 0) return;
+      textarea.value = buildExtraSetTemplate(document.getElementById("config").value);
+    }
+
+    function updateConfigOptions(availableConfigs) {
+      const select = document.getElementById("config");
+      const currentValue = select.value || "configs/train_joint_contrastive.yaml";
+      if (!availableConfigs || !availableConfigs.length) {
+        applyExtraSetTemplate(false);
+        return;
+      }
+      configPresets = {};
+      availableConfigs.forEach((item) => {
+        configPresets[item.path] = item;
+      });
+      select.innerHTML = availableConfigs
+        .map((item) => '<option value="' + item.path + '">' + item.path + '</option>')
+        .join("");
+      select.value = configPresets[currentValue] ? currentValue : "configs/train_joint_contrastive.yaml";
+      applyExtraSetTemplate(false);
+    }
+
+    function buildMonitorPlaceholder() {
+      return `
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <style>
+    :root {
+      --bg: #f6f9ff;
+      --panel: rgba(255, 255, 255, 0.92);
+      --line: rgba(120, 145, 188, 0.2);
+      --ink: #1b2638;
+      --muted: #6c7b91;
+      --accent: #2f7df6;
+      --accent-2: #0fb5a7;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      padding: 18px;
+      color: var(--ink);
+      font-family: "Segoe UI Variable", "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+      background:
+        radial-gradient(circle at top left, rgba(47, 125, 246, 0.12), transparent 24%),
+        linear-gradient(180deg, #fbfdff 0%, #f3f7ff 100%);
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 16px;
+    }
+    .card {
+      border: 1px solid var(--line);
+      border-radius: 24px;
+      background: var(--panel);
+      padding: 18px;
+      box-shadow: 0 18px 44px rgba(66, 99, 170, 0.1);
+    }
+    .stats {
+      grid-column: 1 / -1;
+      display: grid;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      gap: 14px;
+    }
+    .stat {
+      min-height: 88px;
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      padding: 14px;
+      background: linear-gradient(180deg, rgba(255,255,255,0.96), rgba(244,249,255,0.96));
+    }
+    .label {
+      color: var(--muted);
+      font-size: 12px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      margin-bottom: 10px;
+    }
+    .value {
+      font-size: 24px;
+      font-weight: 700;
+    }
+    .value.muted {
+      color: #91a0b5;
+    }
+    .title {
+      margin: 0 0 14px 0;
+      font-size: 18px;
+      font-weight: 700;
+    }
+    .chart,
+    .image-box {
+      height: 360px;
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      background:
+        linear-gradient(180deg, rgba(255,255,255,0.95), rgba(248,251,255,0.98)),
+        repeating-linear-gradient(
+          to right,
+          transparent 0,
+          transparent 79px,
+          rgba(120,145,188,0.07) 80px
+        );
+      position: relative;
+      overflow: hidden;
+    }
+    .chart::before,
+    .image-box::before {
+      content: "";
+      position: absolute;
+      inset: 20px 20px 44px 20px;
+      border-left: 3px solid rgba(95, 111, 138, 0.7);
+      border-bottom: 3px solid rgba(95, 111, 138, 0.7);
+      border-radius: 2px;
+    }
+    .chart::after {
+      content: "等待训练启动";
+      position: absolute;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--muted);
+      font-size: 16px;
+      font-weight: 600;
+      letter-spacing: 0.04em;
+    }
+    .image-box::after {
+      content: "t-SNE 占位";
+      position: absolute;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--muted);
+      font-size: 16px;
+      font-weight: 600;
+      letter-spacing: 0.04em;
+    }
+    @media (max-width: 980px) {
+      .grid { grid-template-columns: 1fr; }
+      .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    }
+  </style>
+</head>
+<body>
+  <div class="grid">
+    <div class="stats">
+      <div class="stat"><div class="label">status</div><div class="value">training</div></div>
+      <div class="stat"><div class="label">epoch</div><div class="value muted">--</div></div>
+      <div class="stat"><div class="label">samples</div><div class="value muted">--</div></div>
+      <div class="stat"><div class="label">objective</div><div class="value muted">--</div></div>
+      <div class="stat"><div class="label">learning rate</div><div class="value muted">--</div></div>
+    </div>
+    <div class="card">
+      <h3 class="title">训练损失曲线</h3>
+      <div class="chart"></div>
+    </div>
+    <div class="card">
+      <h3 class="title">R@1 / R@5 曲线</h3>
+      <div class="chart"></div>
+    </div>
+    <div class="card" style="grid-column: 1 / -1;">
+      <h3 class="title">t-SNE 表征</h3>
+      <div class="image-box"></div>
+    </div>
+  </div>
+</body>
+</html>`;
+    }
+
+    function setMonitorPlaceholder() {
+      const frame = document.getElementById("monitorFrame");
+      if (frame.dataset.mode === "placeholder") return;
+      frame.removeAttribute("src");
+      frame.srcdoc = buildMonitorPlaceholder();
+      frame.dataset.mode = "placeholder";
+      frame.dataset.currentSrc = "";
+    }
+
+    function renderStatus(status) {
+      const normalizedState = status.running ? "training" : "end";
+      const statusStrip = document.getElementById("statusStrip");
+      statusStrip.innerHTML =
+        '<div class="status-card">'
+        + '<div class="label">status</div>'
+        + '<div class="status-chip ' + normalizedState + '"><span class="dot"></span>' + normalizedState + '</div>'
+        + '</div>'
+        + '<div class="meta-card"><div class="label">objective</div><div class="meta-value">' + (status.objective_name || "--") + '</div></div>'
+        + '<div class="meta-card"><div class="label">output</div><div class="meta-value">' + (status.output_dir || "--") + '</div></div>';
+
+      document.getElementById("commandBox").textContent = (status.command || []).join(" ");
+      document.getElementById("logBox").textContent = (status.log_tail || []).join("\n");
+
+      const frame = document.getElementById("monitorFrame");
+      if (status.monitor_url) {
+        if (frame.dataset.currentSrc !== status.monitor_url) {
+          frame.removeAttribute("srcdoc");
+          frame.src = status.monitor_url;
+          frame.dataset.mode = "live";
+          frame.dataset.currentSrc = status.monitor_url;
+        }
+      } else {
+        setMonitorPlaceholder();
+      }
+    }
+
+    async function loadStatus() {
+      try {
+        const status = await fetchJSON("/api/status");
+        renderStatus(status);
+        updateConfigOptions(status.available_configs || []);
+      } catch (error) {
+        console.error(error);
+      }
+    }
+
+    async function startJob() {
+      syncTrainSamplesIfLocked();
+      const payload = {
+        config: document.getElementById("config").value,
+        pretrain_mode: document.getElementById("pretrain_mode").value,
+        target_dataset: document.getElementById("target_dataset").value.trim(),
+        held_out_subject: document.getElementById("held_out_subject").value.trim(),
+        train_max_samples: Number(document.getElementById("train_max_samples").value),
+        max_samples: Number(document.getElementById("max_samples").value),
+        tsne_max_points: Number(document.getElementById("tsne_max_points").value),
+        tsne_interval_epochs: Number(document.getElementById("tsne_interval_epochs").value),
+        projection_method: document.getElementById("projection_method").value,
+        update_interval_steps: 20,
+        refresh_interval_sec: Number(document.getElementById("refresh_interval_sec").value),
+        force_cpu: document.getElementById("force_cpu").value === "true",
+        extra_set: splitExtraSet(document.getElementById("extra_set").value),
+      };
+      try {
+        await fetchJSON("/api/start", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        await loadStatus();
+      } catch (error) {
+        alert(error.message);
+      }
+    }
+
+    async function stopJob() {
+      try {
+        await fetchJSON("/api/stop", { method: "POST" });
+        await loadStatus();
+      } catch (error) {
+        alert(error.message);
+      }
+    }
+
+    document.getElementById("startBtn").addEventListener("click", startJob);
+    document.getElementById("stopBtn").addEventListener("click", stopJob);
+    document.getElementById("max_samples").addEventListener("input", syncTrainSamplesIfLocked);
+    document.getElementById("lockTrainSamples").addEventListener("change", syncTrainSamplesIfLocked);
+    document.getElementById("config").addEventListener("change", () => applyExtraSetTemplate(true));
+
+    bindTabs();
+    setMonitorPlaceholder();
+    applyExtraSetTemplate(true);
+    loadStatus();
+    window.setInterval(loadStatus, 3000);
+  </script>
+</body>
+</html>

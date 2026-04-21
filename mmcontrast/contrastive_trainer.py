@@ -3,19 +3,21 @@ from __future__ import annotations
 """对比学习训练器。"""
 
 from contextlib import nullcontext
+import os
 from pathlib import Path
 import time
 from typing import Any
 
 import torch
 from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.utils.data import DataLoader, DistributedSampler
+from torch.utils.data import DataLoader, DistributedSampler, Subset
 
 from .datasets import PairedEEGfMRIDataset
 from .distributed import cleanup_distributed, configure_cudnn, configure_runtime_devices, gather_tensor, init_distributed, is_dist_initialized, is_main_process, runtime_summary
 from .losses import BarlowTwinsPretrainLoss, PureInfoNCEPretrainLoss, SharedPrivatePretrainLoss
 from .metrics import contrastive_retrieval_metrics
 from .models import EEGfMRIContrastiveModel, EEGfMRISharedOnlyContrastiveModel
+from .pretrain_online_monitor import PretrainOnlineMonitor
 
 
 def _build_grad_scaler(enabled: bool) -> torch.amp.GradScaler | torch.cuda.amp.GradScaler:
@@ -39,6 +41,8 @@ class ContrastiveTrainer:
         self.pretrain_objective = str(train_cfg.get("pretrain_objective", "shared_private")).strip().lower()
 
         train_dataset = self.build_dataset(data_cfg, split="train")
+        train_dataset = self.maybe_limit_train_dataset(train_dataset, train_cfg)
+        self.train_dataset = train_dataset
         # 多卡时由 DistributedSampler 负责切分样本，避免重复读同一数据。
         self.sampler = DistributedSampler(train_dataset, shuffle=True, drop_last=False) if is_dist_initialized() else None
         self.train_loader = self.build_loader(
@@ -128,9 +132,48 @@ class ContrastiveTrainer:
         self.ckpt_dir = self.output_dir / "checkpoints"
         self.resume_path = str(train_cfg.get("resume_path", "")).strip()
         self.start_epoch = 1
+        self.online_monitor: PretrainOnlineMonitor | None = None
+        self.online_monitor_enabled = False
 
         if is_main_process():
             self.ckpt_dir.mkdir(parents=True, exist_ok=True)
+            visualization_cfg = train_cfg.get("visualization", {}) or {}
+            online_cfg = visualization_cfg.get("online_monitor", {}) or {}
+            if bool(online_cfg.get("enabled", False)):
+                self.online_monitor_enabled = True
+                online_output_dir = str(online_cfg.get("output_dir", "")).strip()
+                resolved_online_output_dir = self.resolve_path(online_output_dir) if online_output_dir else (self.output_dir / "online_monitor")
+                self.online_monitor = PretrainOnlineMonitor(
+                    output_dir=resolved_online_output_dir,
+                    dataset=train_dataset,
+                    batch_size=int(online_cfg.get("batch_size", train_cfg.get("eval_batch_size", train_cfg.get("batch_size", 16)))),
+                    num_workers=int(online_cfg.get("num_workers", train_cfg.get("num_workers", 4))),
+                    pin_memory=bool(online_cfg.get("pin_memory", train_cfg.get("pin_memory", True))),
+                    update_interval_steps=int(online_cfg.get("update_interval_steps", self.log_interval)),
+                    max_samples=int(online_cfg.get("max_samples", 1000)),
+                    random_seed=int(online_cfg.get("random_seed", 42)),
+                    tsne_interval_epochs=int(online_cfg.get("tsne_interval_epochs", 1)),
+                    tsne_max_points=int(online_cfg.get("tsne_max_points", online_cfg.get("max_samples", 1000))),
+                    refresh_interval_sec=int(online_cfg.get("refresh_interval_sec", 10)),
+                    objective_name=self.pretrain_objective,
+                    projection_method=str(online_cfg.get("projection_method", "pca")),
+                )
+                print(f"Online monitor enabled: {resolved_online_output_dir}", flush=True)
+        if (not is_main_process()) and bool((train_cfg.get("visualization", {}) or {}).get("online_monitor", {}).get("enabled", False)):
+            self.online_monitor_enabled = True
+
+        if self.online_monitor_enabled and os.name == "nt" and int(train_cfg.get("num_workers", 4)) > 0:
+            self.train_loader = self.build_loader(
+                train_dataset,
+                batch_size=int(train_cfg.get("batch_size", 16)),
+                sampler=self.sampler,
+                shuffle=self.sampler is None,
+                drop_last=False,
+                num_workers=0,
+                pin_memory=bool(train_cfg.get("pin_memory", True)),
+            )
+            if is_main_process():
+                print("Online monitor on Windows: forcing pretrain DataLoader num_workers=0 for stability.", flush=True)
 
         if self.resume_path:
             self.load_checkpoint(self.resolve_path(self.resume_path))
@@ -200,6 +243,24 @@ class ContrastiveTrainer:
             drop_last=drop_last,
             persistent_workers=effective_num_workers > 0,
         )
+
+    def maybe_limit_train_dataset(self, dataset, train_cfg: dict[str, Any]):
+        visualization_cfg = train_cfg.get("visualization", {}) or {}
+        online_monitor_cfg = visualization_cfg.get("online_monitor", {}) or {}
+        max_samples = int(online_monitor_cfg.get("train_max_samples", train_cfg.get("max_samples", 0)) or 0)
+        if max_samples <= 0 or max_samples >= len(dataset):
+            return dataset
+        subset_seed = int(online_monitor_cfg.get("train_max_samples_seed", train_cfg.get("max_samples_seed", 42)) or 42)
+        generator = torch.Generator()
+        generator.manual_seed(subset_seed)
+        indices = torch.randperm(len(dataset), generator=generator)[:max_samples].tolist()
+        if is_main_process():
+            print(
+                f"Training dataset limited to {max_samples}/{len(dataset)} samples "
+                f"(online monitor train subset, seed={subset_seed}).",
+                flush=True,
+            )
+        return Subset(dataset, indices)
 
     def build_model(self, cfg: dict[str, Any]) -> torch.nn.Module:
         """解析路径后实例化双塔对比学习模型。"""
@@ -324,6 +385,17 @@ class ContrastiveTrainer:
                 self.scheduler.step()
             for key in running:
                 running[key] += float(loss_dict[key].item())
+            if self.online_monitor is not None:
+                step_interval = max(1, int(self.online_monitor.update_interval_steps))
+                if step % step_interval == 0 or step == len(self.train_loader):
+                    self.online_monitor.record_step(
+                        epoch=epoch,
+                        step=step,
+                        steps_per_epoch=len(self.train_loader),
+                        global_step=(epoch - 1) * max(1, len(self.train_loader)) + step,
+                        train_losses={key: float(loss_dict[key].item()) for key in running.keys()},
+                        lr=float(self.optimizer.param_groups[0]["lr"]),
+                    )
 
         denom = max(1, len(self.train_loader))
         return {key: value / denom for key, value in running.items()}
@@ -360,11 +432,32 @@ class ContrastiveTrainer:
         last_train_loss = float("nan")
         last_train_losses: dict[str, float] = {}
         last_retrieval_metrics: dict[str, float] = {}
+        if self.online_monitor is not None:
+            bootstrap_metrics = self.online_monitor.evaluate_retrieval(self.model, self.device)
+            bootstrap_tsne = self.online_monitor.maybe_refresh_tsne(self.model, self.device, epoch=0)
+            self.online_monitor.record_epoch(
+                epoch=0,
+                train_losses={"loss": float("nan"), "contrastive_loss": float("nan"), "band_power_loss": float("nan"), "separation_loss": float("nan")},
+                retrieval_metrics=bootstrap_metrics,
+                lr=float(self.optimizer.param_groups[0]["lr"]),
+                tsne_report=bootstrap_tsne,
+            )
         for epoch in range(self.start_epoch, self.epochs + 1):
             train_losses = self.train_one_epoch(epoch)
             last_train_loss = float(train_losses["loss"])
             last_train_losses = train_losses
-            last_retrieval_metrics = self.evaluate_retrieval()
+            if self.online_monitor is not None:
+                last_retrieval_metrics = self.online_monitor.evaluate_retrieval(self.model, self.device)
+                tsne_report = self.online_monitor.maybe_refresh_tsne(self.model, self.device, epoch=epoch)
+                self.online_monitor.record_epoch(
+                    epoch=epoch,
+                    train_losses=train_losses,
+                    retrieval_metrics=last_retrieval_metrics,
+                    lr=float(self.optimizer.param_groups[0]["lr"]),
+                    tsne_report=tsne_report,
+                )
+            else:
+                last_retrieval_metrics = self.evaluate_retrieval()
 
             if is_main_process():
                 summary_parts = [
@@ -402,6 +495,8 @@ class ContrastiveTrainer:
                 f"fold_elapsed={fold_elapsed_seconds:.1f}s",
                 flush=True,
             )
+        if self.online_monitor is not None:
+            self.online_monitor.mark_finished()
         self.save_metrics("final_metrics.json", final_metrics)
         cleanup_distributed()
 

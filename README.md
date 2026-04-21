@@ -288,12 +288,33 @@ python run_pretrain.py --config configs\train_joint_contrastive.yaml
 - `strict`：仍然直接使用现有 `cache\joint_contrastive` 缓存，不重新做预处理；只是在启动预训练时，从 `manifest_all.csv` 中排除“目标数据集中的目标测试被试”，生成一份临时过滤 manifest，再用这份 manifest 做预训练。
 - 预训练权重默认写到 `pretrained_weights`：`full` 写到 `pretrained_weights\pretrain_full\<objective>`，`strict` 写到 `pretrained_weights\pretrain_strict\<dataset>\<subject>\<objective>`。
 - 如果 `strict` 只传 `--target-dataset`，程序会自动从 `cache\joint_contrastive\manifest_all.csv` 中找出该数据集的全部被试，并连续为每个被试各跑一次 strict 预训练。
+- 还支持在线监控页面：固定抽取一小部分样本，增量展示 t-SNE、训练损失曲线和 R@1/R@5 曲线；默认输出到当前预训练目录下的 `online_monitor\index.html`。
 
 例如，对整个 `ds002336` 生成 strict 预训练权重：
 
 ```powershell
 python run_pretrain.py --config configs\train_joint_contrastive.yaml --pretrain-mode strict --target-dataset ds002336
 ```
+
+开启在线监控并固定抽样 1000 个样本：
+
+```powershell
+python run_pretrain.py --config configs\train_joint_contrastive.yaml --set "train.visualization.online_monitor.enabled=true" --set "train.visualization.online_monitor.max_samples=1000"
+```
+
+如果还需要把真实训练集一起缩小，而不是只缩在线监控子集，可以额外设置 `train.visualization.online_monitor.train_max_samples`：
+
+```powershell
+python run_pretrain.py --config configs\train_joint_contrastive.yaml --set "train.visualization.online_monitor.train_max_samples=1000" --set "train.visualization.online_monitor.enabled=true" --set "train.visualization.online_monitor.max_samples=1000"
+```
+
+如果希望直接用本机网页前后端控制预训练任务、在 HTML 页面里填参数并查看日志与在线监控，可启动：
+
+```powershell
+python server\app.py
+```
+
+然后打开 `http://127.0.0.1:8765`。
 
 Pure InfoNCE baseline：
 
@@ -483,12 +504,27 @@ python run_pretrain.py --config configs/train_joint_contrastive.yaml
 - `strict`：仍然直接使用现有 `cache/joint_contrastive` 缓存，不重新做预处理；只是在启动预训练时，从 `manifest_all.csv` 中排除“目标数据集中的目标测试被试”，生成一份临时过滤 manifest，再用这份 manifest 做预训练。
 - 预训练权重默认写到 `pretrained_weights`：`full` 写到 `pretrained_weights/pretrain_full/<objective>`，`strict` 写到 `pretrained_weights/pretrain_strict/<dataset>/<subject>/<objective>`。
 - 如果 `strict` 只传 `--target-dataset`，程序会自动从 `cache/joint_contrastive/manifest_all.csv` 中找出该数据集的全部被试，并连续为每个被试各跑一次 strict 预训练。
+- 还支持在线监控页面：固定抽取一小部分样本，增量展示 t-SNE、训练损失曲线和 R@1/R@5 曲线；默认输出到当前预训练目录下的 `online_monitor/index.html`。
 
 例如，对整个 `ds002336` 生成 strict 预训练权重：
 
 ```bash
 python run_pretrain.py --config configs/train_joint_contrastive.yaml --pretrain-mode strict --target-dataset ds002336
 ```
+
+开启在线监控并固定抽样 1000 个样本：
+
+```bash
+python run_pretrain.py --config configs/train_joint_contrastive.yaml --set "train.visualization.online_monitor.enabled=true" --set "train.visualization.online_monitor.max_samples=1000"
+```
+
+如果希望直接用本机网页前后端控制预训练任务、在 HTML 页面里填参数并查看日志与在线监控，可启动：
+
+```bash
+python server/app.py
+```
+
+然后打开 `http://127.0.0.1:8765`。
 
 Pure InfoNCE baseline：
 
@@ -500,6 +536,12 @@ Barlow Twins baseline：
 
 ```bash
 python run_pretrain.py --config configs/train_joint_barlow_twins.yaml
+```
+
+如果还需要把真实训练集一起缩小，而不是只缩在线监控子集，可以额外设置 `train.visualization.online_monitor.train_max_samples`：
+
+```bash
+python run_pretrain.py --config configs/train_joint_contrastive.yaml --set "train.visualization.online_monitor.train_max_samples=1000" --set "train.visualization.online_monitor.enabled=true" --set "train.visualization.online_monitor.max_samples=1000"
 ```
 
 ### 9. LOSO 全折微调 ds009999
@@ -852,8 +894,11 @@ python run_optuna_search.py --study-config configs/optuna_ds009999_linux.yaml --
 
 常见输出：
 
-- `outputs/joint_contrastive/contrastive/checkpoints/best.pth`
-- `outputs/joint_contrastive/contrastive/final_metrics.json`
+- `pretrained_weights/pretrain_full/contrastive/checkpoints/best.pth`
+- `pretrained_weights/pretrain_full/contrastive/final_metrics.json`
+- `pretrained_weights/pretrain_full/contrastive/online_monitor/index.html`
+- `pretrained_weights/pretrain_full/contrastive/online_monitor/monitor_state.json`
+- `pretrained_weights/pretrain_full/contrastive/online_monitor/tsne_latest.png`
 
 ### 2. 微调
 

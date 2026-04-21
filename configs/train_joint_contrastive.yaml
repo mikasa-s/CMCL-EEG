@@ -1,16 +1,16 @@
 train:
-  output_dir: pretrained_weights/full/contrastive
+  output_dir: pretrained_weights/pretrain_full/contrastive
   force_cpu: false
   gpu_count: 1
   gpu_ids: []
   epochs: 1
-  batch_size: 128
-  eval_batch_size: 128
+  batch_size: 64
+  eval_batch_size: 64
   # gpu_ids: [3]
   # epochs: 200
   # batch_size: 512
   # eval_batch_size: 512
-  num_workers: 8
+  num_workers: 4
   pin_memory: true
   lr: 0.0001
   min_lr: 0.00005
@@ -26,6 +26,19 @@ train:
   log_interval: 200
   eval_interval: 1
   resume_path: ""
+  visualization:
+    online_monitor:
+      enabled: false
+      output_dir: ""
+      max_samples: 1000
+      train_max_samples: 0
+      train_max_samples_seed: 42
+      random_seed: 42
+      projection_method: pca
+      tsne_interval_epochs: 1
+      tsne_max_points: 1000
+      refresh_interval_sec: 10
+      update_interval_steps: 20
 
 data:
   manifest_csv: cache/joint_contrastive/manifest_all.csv
