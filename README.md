@@ -286,7 +286,7 @@ python run_pretrain.py --config configs\train_joint_contrastive.yaml
 
 - `full`：直接使用 `cache\joint_contrastive\manifest_all.csv` 中的全部样本做联合预训练。
 - `strict`：仍然直接使用现有 `cache\joint_contrastive` 缓存，不重新做预处理；只是在启动预训练时，从 `manifest_all.csv` 中排除“目标数据集中的目标测试被试”，生成一份临时过滤 manifest，再用这份 manifest 做预训练。
-- 预训练权重默认写到 `pretrained_weights`：`full` 写到 `pretrained_weights\full\<objective>`，`strict` 写到 `pretrained_weights\strict\<dataset>\<subject>\<objective>`。
+- 预训练权重默认写到 `pretrained_weights`：`full` 写到 `pretrained_weights\pretrain_full\<objective>`，`strict` 写到 `pretrained_weights\pretrain_strict\<dataset>\<subject>\<objective>`。
 - 如果 `strict` 只传 `--target-dataset`，程序会自动从 `cache\joint_contrastive\manifest_all.csv` 中找出该数据集的全部被试，并连续为每个被试各跑一次 strict 预训练。
 
 例如，对整个 `ds002336` 生成 strict 预训练权重：
@@ -481,7 +481,7 @@ python run_pretrain.py --config configs/train_joint_contrastive.yaml
 
 - `full`：直接使用 `cache/joint_contrastive/manifest_all.csv` 中的全部样本做联合预训练。
 - `strict`：仍然直接使用现有 `cache/joint_contrastive` 缓存，不重新做预处理；只是在启动预训练时，从 `manifest_all.csv` 中排除“目标数据集中的目标测试被试”，生成一份临时过滤 manifest，再用这份 manifest 做预训练。
-- 预训练权重默认写到 `pretrained_weights`：`full` 写到 `pretrained_weights/full/<objective>`，`strict` 写到 `pretrained_weights/strict/<dataset>/<subject>/<objective>`。
+- 预训练权重默认写到 `pretrained_weights`：`full` 写到 `pretrained_weights/pretrain_full/<objective>`，`strict` 写到 `pretrained_weights/pretrain_strict/<dataset>/<subject>/<objective>`。
 - 如果 `strict` 只传 `--target-dataset`，程序会自动从 `cache/joint_contrastive/manifest_all.csv` 中找出该数据集的全部被试，并连续为每个被试各跑一次 strict 预训练。
 
 例如，对整个 `ds002336` 生成 strict 预训练权重：

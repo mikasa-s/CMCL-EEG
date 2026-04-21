@@ -37,13 +37,13 @@ def _to_numpy(x: torch.Tensor, max_items: int | None = None) -> np.ndarray:
     return x.detach().float().cpu().numpy()
 
 
-def save_shared_private_tsne(
-    eeg_shared: torch.Tensor,
-    eeg_private: torch.Tensor,
-    fmri_shared: torch.Tensor,
+def save_embedding_groups_tsne(
+    embedding_groups: dict[str, torch.Tensor],
     output_path: str | Path,
     max_points: int = 200,
     random_state: int = 42,
+    title: str = "t-SNE of Embedding Groups",
+    color_map: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     try:
         import matplotlib.pyplot as plt
@@ -53,35 +53,50 @@ def save_shared_private_tsne(
             "Embedding visualization requires matplotlib and scikit-learn."
         ) from exc
 
-    eeg_shared_np = _to_numpy(eeg_shared, max_items=max_points)
-    eeg_private_np = _to_numpy(eeg_private, max_items=max_points)
-    fmri_shared_np = _to_numpy(fmri_shared, max_items=max_points)
+    normalized_groups: list[tuple[str, np.ndarray]] = []
+    for label, tensor in embedding_groups.items():
+        if tensor is None:
+            continue
+        group_np = _to_numpy(tensor, max_items=max_points)
+        if group_np.size == 0:
+            continue
+        normalized_groups.append((str(label), group_np))
 
-    labels = (
-        ["EEG shared"] * len(eeg_shared_np)
-        + ["EEG private"] * len(eeg_private_np)
-        + ["fMRI shared"] * len(fmri_shared_np)
-    )
-    features = np.concatenate([eeg_shared_np, eeg_private_np, fmri_shared_np], axis=0)
-    if features.shape[0] < 3:
+    if len(normalized_groups) < 2:
+        return {"saved": False, "reason": "not_enough_groups"}
+
+    labels: list[str] = []
+    features = []
+    for label, group_np in normalized_groups:
+        labels.extend([label] * len(group_np))
+        features.append(group_np)
+    features_np = np.concatenate(features, axis=0)
+    if features_np.shape[0] < 3:
         return {"saved": False, "reason": "not_enough_points"}
 
-    perplexity = min(30, max(2, features.shape[0] // 6))
+    perplexity = min(30, max(2, features_np.shape[0] // 6))
     tsne = TSNE(n_components=2, perplexity=perplexity, init="pca", learning_rate="auto", random_state=random_state)
-    coords = tsne.fit_transform(features)
+    coords = tsne.fit_transform(features_np)
 
-    output = Path(output_path)
-    _ensure_parent(output)
-    fig, ax = plt.subplots(figsize=(8, 7), dpi=160)
-    color_map = {
+    palette = color_map or {
         "EEG shared": "#1f77b4",
         "EEG private": "#d62728",
         "fMRI shared": "#2ca02c",
     }
-    for label in ["EEG shared", "EEG private", "fMRI shared"]:
-        mask = np.array([item == label for item in labels], dtype=bool)
-        ax.scatter(coords[mask, 0], coords[mask, 1], s=18, alpha=0.75, label=label, c=color_map[label])
-    ax.set_title("t-SNE of EEG/FMRI Shared-Private Representations", fontsize=TITLE_FONTSIZE)
+    fallback_colors = ["#1f77b4", "#d62728", "#2ca02c", "#ff7f0e", "#9467bd", "#8c564b"]
+
+    output = Path(output_path)
+    _ensure_parent(output)
+    fig, ax = plt.subplots(figsize=(8, 7), dpi=160)
+    offset = 0
+    group_counts: dict[str, int] = {}
+    for group_index, (label, group_np) in enumerate(normalized_groups):
+        next_offset = offset + len(group_np)
+        color = palette.get(label, fallback_colors[group_index % len(fallback_colors)])
+        ax.scatter(coords[offset:next_offset, 0], coords[offset:next_offset, 1], s=18, alpha=0.75, label=label, c=color)
+        group_counts[label] = int(len(group_np))
+        offset = next_offset
+    ax.set_title(title, fontsize=TITLE_FONTSIZE)
     ax.set_xlabel("t-SNE 1", fontsize=LABEL_FONTSIZE)
     ax.set_ylabel("t-SNE 2", fontsize=LABEL_FONTSIZE)
     ax.tick_params(axis="both", labelsize=TICK_FONTSIZE)
@@ -92,12 +107,38 @@ def save_shared_private_tsne(
     return {
         "saved": True,
         "path": str(output),
-        "num_points_per_group": {
-            "eeg_shared": int(len(eeg_shared_np)),
-            "eeg_private": int(len(eeg_private_np)),
-            "fmri_shared": int(len(fmri_shared_np)),
-        },
+        "group_counts": group_counts,
+        "perplexity": int(perplexity),
     }
+
+
+def save_shared_private_tsne(
+    eeg_shared: torch.Tensor,
+    eeg_private: torch.Tensor,
+    fmri_shared: torch.Tensor,
+    output_path: str | Path,
+    max_points: int = 200,
+    random_state: int = 42,
+) -> dict[str, Any]:
+    report = save_embedding_groups_tsne(
+        {
+            "EEG shared": eeg_shared,
+            "EEG private": eeg_private,
+            "fMRI shared": fmri_shared,
+        },
+        output_path=output_path,
+        max_points=max_points,
+        random_state=random_state,
+        title="t-SNE of EEG/FMRI Shared-Private Representations",
+    )
+    if report.get("saved"):
+        counts = dict(report.get("group_counts", {}) or {})
+        report["num_points_per_group"] = {
+            "eeg_shared": int(counts.get("EEG shared", 0)),
+            "eeg_private": int(counts.get("EEG private", 0)),
+            "fmri_shared": int(counts.get("fMRI shared", 0)),
+        }
+    return report
 
 
 def save_cross_modal_similarity_heatmap(

@@ -11,8 +11,8 @@ FULL_MODE = "full"
 STRICT_MODE = "strict"
 VALID_PRETRAIN_MODES = {FULL_MODE, STRICT_MODE}
 DEFAULT_FULL_CACHE_DIR = Path("cache/joint_contrastive")
-DEFAULT_FULL_OUTPUT_ROOT = Path("pretrained_weights/full")
-DEFAULT_STRICT_OUTPUT_ROOT = Path("pretrained_weights/strict")
+DEFAULT_FULL_OUTPUT_ROOT = Path("pretrained_weights/pretrain_full")
+DEFAULT_STRICT_OUTPUT_ROOT = Path("pretrained_weights/pretrain_strict")
 
 
 def normalize_pretrain_mode(mode: str) -> str:
