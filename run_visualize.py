@@ -17,6 +17,7 @@ from torch.utils.data import DataLoader, Subset
 
 from mmcontrast.checkpoint_utils import extract_state_dict, load_checkpoint_file
 from mmcontrast.config import TrainConfig
+from mmcontrast.dataset_batching import GroupedBatchSampler
 from mmcontrast.datasets import PairedEEGfMRIDataset
 from mmcontrast.models import EEGfMRIContrastiveModel
 from mmcontrast.visualization import (
@@ -251,11 +252,18 @@ def run_contrastive_visualization(args: argparse.Namespace) -> None:
         dataset = Subset(dataset, sample_indices)
     loader = DataLoader(
         dataset,
-        batch_size=max(1, int(args.batch_size)),
-        shuffle=False,
+        batch_sampler=GroupedBatchSampler(
+            dataset,
+            batch_size=max(1, int(args.batch_size)),
+            group_field="dataset",
+            shuffle=False,
+            drop_last=False,
+            world_size=1,
+            rank=0,
+            seed=int(args.sample_seed) if args.sample_seed is not None else 42,
+        ),
         num_workers=max(0, int(args.num_workers)),
         pin_memory=device.type == "cuda",
-        drop_last=False,
         persistent_workers=bool(args.num_workers > 0),
     )
 

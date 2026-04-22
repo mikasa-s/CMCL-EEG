@@ -197,6 +197,18 @@ class PairedEEGfMRIDataset(Dataset):
     def __len__(self) -> int:
         return self.sample_count
 
+    def get_sample_group_values(self, field_name: str) -> list[str]:
+        values: list[str] = []
+        if self.subject_packed:
+            for row in self.rows:
+                sample_count = int(row["sample_count"])
+                value = str(row.get(field_name, ""))
+                values.extend([value] * sample_count)
+            return values
+        for row in self.rows:
+            values.append(str(row.get(field_name, "")))
+        return values
+
     def _load_manifest_row_item(self, idx: int) -> dict[str, Any]:
         row = self.rows[idx]
         item: dict[str, Any] = {"sample_id": str(row.get("sample_id", idx))}

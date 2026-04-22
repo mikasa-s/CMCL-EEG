@@ -12,6 +12,7 @@ import torch
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, DistributedSampler, Subset
 
+from .dataset_batching import GroupedBatchSampler
 from .datasets import PairedEEGfMRIDataset
 from .distributed import cleanup_distributed, configure_cudnn, configure_runtime_devices, gather_tensor, init_distributed, is_dist_initialized, is_main_process, runtime_summary
 from .losses import BarlowTwinsPretrainLoss, PureInfoNCEPretrainLoss, SharedPrivatePretrainLoss
@@ -44,12 +45,23 @@ class ContrastiveTrainer:
         train_dataset = self.maybe_limit_train_dataset(train_dataset, train_cfg)
         self.train_dataset = train_dataset
         # 多卡时由 DistributedSampler 负责切分样本，避免重复读同一数据。
-        self.sampler = DistributedSampler(train_dataset, shuffle=True, drop_last=False) if is_dist_initialized() else None
+        self.sampler = None
+        self.batch_sampler = GroupedBatchSampler(
+            train_dataset,
+            batch_size=int(train_cfg.get("batch_size", 16)),
+            group_field="dataset",
+            shuffle=True,
+            drop_last=False,
+            world_size=self.world_size,
+            rank=self.rank,
+            seed=42,
+        )
         self.train_loader = self.build_loader(
             train_dataset,
             batch_size=int(train_cfg.get("batch_size", 16)),
-            sampler=self.sampler,
-            shuffle=self.sampler is None,
+            sampler=None,
+            batch_sampler=self.batch_sampler,
+            shuffle=False,
             drop_last=False,
             num_workers=int(train_cfg.get("num_workers", 4)),
             pin_memory=bool(train_cfg.get("pin_memory", True)),
@@ -166,8 +178,9 @@ class ContrastiveTrainer:
             self.train_loader = self.build_loader(
                 train_dataset,
                 batch_size=int(train_cfg.get("batch_size", 16)),
-                sampler=self.sampler,
-                shuffle=self.sampler is None,
+                sampler=None,
+                batch_sampler=self.batch_sampler,
+                shuffle=False,
                 drop_last=False,
                 num_workers=0,
                 pin_memory=bool(train_cfg.get("pin_memory", True)),
@@ -230,18 +243,23 @@ class ContrastiveTrainer:
         dataset_cfg["require_band_power"] = self.pretrain_objective == "shared_private"
         return PairedEEGfMRIDataset(**dataset_cfg)
 
-    def build_loader(self, dataset, batch_size: int, sampler=None, shuffle=False, drop_last=False, num_workers=4, pin_memory=True):
+    def build_loader(self, dataset, batch_size: int, sampler=None, batch_sampler=None, shuffle=False, drop_last=False, num_workers=4, pin_memory=True):
         """统一封装 DataLoader 创建逻辑，避免训练和评估重复写参数。"""
         effective_num_workers = 0 if getattr(dataset, "is_preloaded", False) else num_workers
+        common_kwargs = {
+            "dataset": dataset,
+            "num_workers": effective_num_workers,
+            "pin_memory": pin_memory,
+            "persistent_workers": effective_num_workers > 0,
+        }
+        if batch_sampler is not None:
+            return DataLoader(batch_sampler=batch_sampler, **common_kwargs)
         return DataLoader(
-            dataset,
             batch_size=batch_size,
             shuffle=shuffle,
             sampler=sampler,
-            num_workers=effective_num_workers,
-            pin_memory=pin_memory,
             drop_last=drop_last,
-            persistent_workers=effective_num_workers > 0,
+            **common_kwargs,
         )
 
     def maybe_limit_train_dataset(self, dataset, train_cfg: dict[str, Any]):
@@ -327,6 +345,8 @@ class ContrastiveTrainer:
         """执行一个 epoch 的对比学习训练。"""
         if self.sampler is not None:
             self.sampler.set_epoch(epoch)
+        if self.batch_sampler is not None and hasattr(self.batch_sampler, "set_epoch"):
+            self.batch_sampler.set_epoch(epoch)
 
         self.model.train()
         running = {

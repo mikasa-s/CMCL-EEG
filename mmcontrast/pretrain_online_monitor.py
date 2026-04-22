@@ -9,6 +9,7 @@ from typing import Any
 import torch
 from torch.utils.data._utils.collate import default_collate
 
+from .dataset_batching import resolve_sample_group_values
 from .metrics import contrastive_retrieval_metrics
 from .visualization import save_embedding_groups_pca, save_embedding_groups_tsne
 
@@ -66,6 +67,12 @@ class PretrainOnlineMonitor:
             subset_indices = torch.randperm(len(dataset), generator=generator)[:sample_count].tolist()
             subset_indices.sort()
         self.sample_indices = subset_indices
+        all_group_values = resolve_sample_group_values(dataset, "dataset")
+        grouped_indices: dict[str, list[int]] = {}
+        for index in self.sample_indices:
+            group_name = str(all_group_values[int(index)])
+            grouped_indices.setdefault(group_name, []).append(int(index))
+        self.grouped_sample_indices = grouped_indices
         self.state: dict[str, Any] = {
             "title": "Pretrain Online Monitor",
             "objective": self.objective_name,
@@ -184,19 +191,20 @@ class PretrainOnlineMonitor:
             "fmri_embed": [],
         }
         with torch.no_grad():
-            for batch_start in range(0, len(self.sample_indices), self.batch_size):
-                batch_indices = self.sample_indices[batch_start : batch_start + self.batch_size]
-                samples = [self.dataset[index] for index in batch_indices]
-                batch = default_collate(samples)
-                eeg = batch["eeg"].to(device, non_blocking=True)
-                fmri = batch["fmri"].to(device, non_blocking=True)
-                batch_out = model(eeg=eeg, fmri=fmri)
-                outputs["eeg_shared"].append(batch_out["eeg_shared"].detach().cpu())
-                outputs["fmri_shared"].append(batch_out["fmri_shared"].detach().cpu())
-                outputs["eeg_embed"].append(batch_out["eeg_embed"].detach().cpu())
-                outputs["fmri_embed"].append(batch_out["fmri_embed"].detach().cpu())
-                if "eeg_private" in batch_out:
-                    outputs["eeg_private"].append(batch_out["eeg_private"].detach().cpu())
+            for batch_indices_by_group in self.grouped_sample_indices.values():
+                for batch_start in range(0, len(batch_indices_by_group), self.batch_size):
+                    batch_indices = batch_indices_by_group[batch_start : batch_start + self.batch_size]
+                    samples = [self.dataset[index] for index in batch_indices]
+                    batch = default_collate(samples)
+                    eeg = batch["eeg"].to(device, non_blocking=True)
+                    fmri = batch["fmri"].to(device, non_blocking=True)
+                    batch_out = model(eeg=eeg, fmri=fmri)
+                    outputs["eeg_shared"].append(batch_out["eeg_shared"].detach().cpu())
+                    outputs["fmri_shared"].append(batch_out["fmri_shared"].detach().cpu())
+                    outputs["eeg_embed"].append(batch_out["eeg_embed"].detach().cpu())
+                    outputs["fmri_embed"].append(batch_out["fmri_embed"].detach().cpu())
+                    if "eeg_private" in batch_out:
+                        outputs["eeg_private"].append(batch_out["eeg_private"].detach().cpu())
         if previous_mode:
             model.train()
         return {key: torch.cat(value, dim=0) for key, value in outputs.items() if value}

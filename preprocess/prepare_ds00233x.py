@@ -325,6 +325,12 @@ def read_brainvision_eeg_only(eeg_vhdr_path: Path, preload: bool) -> mne.io.Base
     with warnings.catch_warnings():
         warnings.filterwarnings(
             "ignore",
+            category=RuntimeWarning,
+            message=r".*Not setting position of .* misc channel found in montage.*",
+        )
+        warnings.filterwarnings(
+            "ignore",
+            category=RuntimeWarning,
             message=r".*Consider setting the channel types to be of EEG/sEEG/ECoG/DBS/fNIRS using inst.set_channel_types before calling inst.set_montage.*",
         )
         raw = mne.io.read_raw_brainvision(str(eeg_vhdr_path), preload=preload, verbose="ERROR")

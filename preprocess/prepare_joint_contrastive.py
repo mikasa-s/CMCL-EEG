@@ -271,6 +271,51 @@ def intersect_channel_orders(dataset_channel_orders: dict[str, list[str]], datas
     return [channel for channel in anchor_order if channel in common]
 
 
+def build_dataset_target_channel_orders(
+    dataset_channel_orders: dict[str, list[str]],
+    common_channel_names: list[str],
+) -> dict[str, list[str]]:
+    common_set = set(common_channel_names)
+    dataset_target_orders: dict[str, list[str]] = {}
+    for dataset_name, channel_names in dataset_channel_orders.items():
+        trailing_channels = [channel for channel in channel_names if channel not in common_set]
+        dataset_target_orders[dataset_name] = list(common_channel_names) + trailing_channels
+    return dataset_target_orders
+
+
+def build_dataset_channel_orders_from_rows(rows: list[dict[str, object]]) -> dict[str, list[str]]:
+    dataset_channel_orders: dict[str, list[str]] = {}
+    if not rows:
+        return dataset_channel_orders
+    frame = pd.DataFrame(rows)
+    if "dataset" not in frame.columns:
+        return dataset_channel_orders
+    for dataset_name, dataset_frame in frame.groupby("dataset", sort=False):
+        ordered_frame = dataset_frame.copy()
+        if "source_channel_index" in ordered_frame.columns:
+            ordered_frame = ordered_frame.sort_values(by="source_channel_index", kind="stable")
+        channel_names: list[str] = []
+        seen: set[str] = set()
+        for _, row in ordered_frame.iterrows():
+            candidate = (
+                row.get("source_channel_name")
+                if "source_channel_name" in ordered_frame.columns
+                else row.get("channel_name")
+                if "channel_name" in ordered_frame.columns
+                else row.get("target_channel_name")
+            )
+            if candidate is None:
+                continue
+            channel_name = str(candidate).strip()
+            if not channel_name or channel_name in seen:
+                continue
+            seen.add(channel_name)
+            channel_names.append(channel_name)
+        if channel_names:
+            dataset_channel_orders[str(dataset_name)] = channel_names
+    return dataset_channel_orders
+
+
 def export_sample(
     *,
     out_root: Path,
@@ -388,7 +433,7 @@ def prepare_joint_dataset_ds33x(
     ds_root: Path,
     subjects: list[str],
     canonical_map: dict[str, str],
-    target_channel_names: list[str],
+    dataset_target_channel_names: list[str],
     out_root: Path,
     labels_img: str,
     seq_len: int,
@@ -421,7 +466,7 @@ def prepare_joint_dataset_ds33x(
                 if not recording.eeg_vhdr.exists() or not recording.fmri_nii.exists():
                     continue
                 raw_eeg, raw_sfreq, eeg_protocol_start_sec, eeg_channel_names = load_ds002336_eeg(recording.eeg_vhdr, drop_ecg=bool(getattr(args, f"{dataset_name}_drop_ecg")))
-                reordered_preview, mapping_rows = reorder_eeg_channels(raw_eeg, eeg_channel_names, target_channel_names)
+                reordered_preview, mapping_rows = reorder_eeg_channels(raw_eeg, eeg_channel_names, dataset_target_channel_names)
                 if (not subject_channel_mapping_rows) and mapping_rows:
                     subject_channel_mapping_rows.extend({"dataset": dataset_name, **row} for row in mapping_rows)
                 eeg_data, processed_sfreq = preprocess_joint_eeg(reordered_preview, source_sfreq=raw_sfreq, args=args)
@@ -635,7 +680,7 @@ def main() -> None:
     if preserved_channel_mapping_rows:
         preserved_channel_mapping_rows = [row for row in preserved_channel_mapping_rows if str(row.get("dataset", "")) not in set(dataset_order_to_process)]
 
-    dataset_channel_orders: dict[str, list[str]] = {}
+    dataset_channel_orders: dict[str, list[str]] = build_dataset_channel_orders_from_rows(preserved_dataset_channel_rows)
     dataset_subjects: dict[str, list[str]] = {}
     dataset_canonical_subject_maps: dict[str, dict[str, str]] = {}
     subject_mapping_rows: list[dict[str, object]] = []
@@ -690,20 +735,11 @@ def main() -> None:
         )
 
     previous_target_channel_names = load_target_channel_names(existing_target_channel_path) if existing_target_channel_path.exists() else None
-    if previous_target_channel_names and skipped_existing_datasets:
-        if dataset_channel_orders:
-            common = set(previous_target_channel_names)
-            for channels in dataset_channel_orders.values():
-                common &= set(channels)
-            target_channel_names = [channel for channel in previous_target_channel_names if channel in common]
-            if not target_channel_names:
-                raise RuntimeError("No shared EEG channels remain after merging existing cache channels with newly processed datasets.")
-        else:
-            target_channel_names = list(previous_target_channel_names)
-    else:
-        if not dataset_channel_orders:
-            raise RuntimeError("No datasets were selected for processing and no existing channel manifest was found.")
-        target_channel_names = intersect_channel_orders(dataset_channel_orders, dataset_order_to_process)
+    if not dataset_channel_orders:
+        raise RuntimeError("No dataset channel metadata is available. Rebuild the joint cache from source datasets.")
+    common_channel_names = intersect_channel_orders(dataset_channel_orders, dataset_order)
+
+    dataset_target_channel_orders = build_dataset_target_channel_orders(dataset_channel_orders, common_channel_names)
 
     records: list[ContrastiveSampleRecord] = []
     subject_records: list[ContrastiveSubjectRecord] = []
@@ -725,7 +761,7 @@ def main() -> None:
                         ds_root=getattr(args, f"{dataset_name}_root"),
                         subjects=dataset_subjects[dataset_name],
                         canonical_map=dataset_canonical_subject_maps[dataset_name],
-                        target_channel_names=target_channel_names,
+                        dataset_target_channel_names=dataset_target_channel_orders[dataset_name],
                         out_root=out_root,
                         labels_img=labels_img,
                         seq_len=seq_len,
@@ -747,7 +783,7 @@ def main() -> None:
                     ds_root=getattr(args, f"{dataset_name}_root"),
                     subjects=dataset_subjects[dataset_name],
                     canonical_map=dataset_canonical_subject_maps[dataset_name],
-                    target_channel_names=target_channel_names,
+                    dataset_target_channel_names=dataset_target_channel_orders[dataset_name],
                     out_root=out_root,
                     labels_img=labels_img,
                     seq_len=seq_len,
@@ -791,7 +827,11 @@ def main() -> None:
                         continue
 
                     raw_eeg, raw_sfreq, kept_electrodes = load_eeg_data(eeg_data_path, electrode_template=electrode_template)
-                    reordered_preview, mapping_rows = reorder_eeg_channels(raw_eeg, kept_electrodes, target_channel_names)
+                    reordered_preview, mapping_rows = reorder_eeg_channels(
+                        raw_eeg,
+                        kept_electrodes,
+                        dataset_target_channel_orders["ds002739"],
+                    )
                     if (not subject_channel_mapping_rows) and mapping_rows:
                         subject_channel_mapping_rows.extend({"dataset": "ds002739", **row} for row in mapping_rows)
                     eeg_data, processed_sfreq = preprocess_joint_eeg(reordered_preview, source_sfreq=raw_sfreq, args=args)
@@ -942,16 +982,27 @@ def main() -> None:
     final_subject_rows = preserved_subject_rows + [record.__dict__ for record in subject_records]
     final_sample_rows = [record.__dict__ for record in records]
 
-    if final_subject_rows and previous_target_channel_names is not None and list(previous_target_channel_names) != list(target_channel_names):
-        previous_index = {name: idx for idx, name in enumerate(previous_target_channel_names)}
-        keep_indices = [previous_index[name] for name in target_channel_names if name in previous_index]
-        if len(keep_indices) != len(target_channel_names):
-            raise RuntimeError("Cannot remap existing cache channels because some new target channels were absent in previous target channel list.")
+    previous_dataset_channel_orders = build_dataset_channel_orders_from_rows(preserved_dataset_channel_rows)
+    if final_subject_rows and skipped_existing_datasets and previous_target_channel_names is not None:
         for row in final_subject_rows:
             subject_rel_path = str(row.get("subject_path", "")).strip()
             dataset_name = str(row.get("dataset", "")).strip()
             if not subject_rel_path or dataset_name not in skipped_existing_datasets:
                 continue
+            previous_dataset_order = previous_dataset_channel_orders.get(dataset_name, [])
+            target_dataset_order = dataset_target_channel_orders.get(dataset_name, [])
+            if not previous_dataset_order or not target_dataset_order:
+                raise RuntimeError(
+                    f"Cannot remap existing cache for dataset={dataset_name}. Missing dataset-specific EEG channel metadata. "
+                    "Please rebuild cache/joint_contrastive from source datasets."
+                )
+            previous_index = {name: idx for idx, name in enumerate(previous_dataset_order)}
+            keep_indices = [previous_index[name] for name in target_dataset_order if name in previous_index]
+            if len(keep_indices) != len(target_dataset_order):
+                raise RuntimeError(
+                    f"Cannot remap existing cache for dataset={dataset_name} because some new target channels were absent "
+                    "from the previous dataset-specific channel order. Please rebuild cache/joint_contrastive."
+                )
             updated_eeg_shape = remap_subject_pack_eeg_channels(out_root, subject_rel_path, keep_indices)
             row["eeg_shape"] = updated_eeg_shape
 
@@ -975,7 +1026,7 @@ def main() -> None:
                 "target_channel_index": index,
                 "target_channel_name": channel_name,
             }
-            for index, channel_name in enumerate(target_channel_names)
+            for index, channel_name in enumerate(common_channel_names)
         ],
         out_root / "eeg_channels_target.csv",
     )
