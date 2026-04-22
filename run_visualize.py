@@ -94,6 +94,11 @@ def build_parser() -> argparse.ArgumentParser:
     offline_parser.add_argument("--num-workers", type=int, default=None)
     offline_parser.add_argument("--force-cpu", action="store_true")
     offline_parser.add_argument(
+        "--allow-missing-pretrain-checkpoint",
+        action="store_true",
+        help="If the pretrain checkpoint inferred by finetune config is missing, fall back to random initialization.",
+    )
+    offline_parser.add_argument(
         "--class-names",
         type=str,
         default="",
@@ -381,6 +386,8 @@ def run_offline_loso_visualization(args: argparse.Namespace) -> None:
             command.extend(["--num-workers", str(args.num_workers)])
         if args.force_cpu:
             command.append("--force-cpu")
+        if args.allow_missing_pretrain_checkpoint:
+            command.append("--allow-missing-pretrain-checkpoint")
 
         completed = subprocess.run(command, cwd=str(PROJECT_ROOT), check=False)
         if completed.returncode != 0:

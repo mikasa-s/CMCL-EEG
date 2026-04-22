@@ -43,6 +43,7 @@ data:
   manifest_csv: cache/joint_contrastive/manifest_all.csv
   root_dir: cache/joint_contrastive
   preload_dataset: false
+  subject_pack_cache_size: 24
   expected_eeg_shape: [40, 8, 200]
   expected_fmri_shape: [48, 48, 48, 1]
   normalize_eeg: true

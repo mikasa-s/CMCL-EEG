@@ -47,6 +47,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--target-dataset", type=str, default="", help="Optional target dataset override for strict offline pretrain resolution.")
     parser.add_argument("--held-out-subject", type=str, default="", help="Optional held-out subject override for strict offline pretrain resolution.")
     parser.add_argument("--pretrain-checkpoint-relpath", type=str, default="checkpoints/best.pth")
+    parser.add_argument(
+        "--allow-missing-pretrain-checkpoint",
+        action="store_true",
+        help="If the resolved pretrain checkpoint does not exist, clear it and fall back to random initialization.",
+    )
     parser.add_argument("--finetune-checkpoint", type=str, default="")
     parser.add_argument("--selection-metric", type=str, default="")
     parser.add_argument("--epochs", type=int, default=None)
@@ -111,6 +116,9 @@ def apply_overrides(config: dict, args: argparse.Namespace) -> dict:
         args.pretrain_output_root = str(finetune_cfg.get("pretrain_output_root", "")).strip()
     if not str(args.target_dataset).strip():
         args.target_dataset = str(finetune_cfg.get("target_dataset", "")).strip()
+    allow_missing_pretrain_checkpoint = bool(args.allow_missing_pretrain_checkpoint) or bool(
+        finetune_cfg.get("allow_missing_pretrain_checkpoint", False)
+    )
 
     if (not args.contrastive_checkpoint.strip()) and str(args.pretrain_mode).strip():
         target_dataset = args.target_dataset.strip() or infer_target_dataset_from_root_dir(args.root_dir.strip() or str((config.get("data", {}) or {}).get("root_dir", "")))
@@ -126,7 +134,10 @@ def apply_overrides(config: dict, args: argparse.Namespace) -> dict:
             output_root=args.pretrain_output_root.strip(),
             checkpoint_relpath=args.pretrain_checkpoint_relpath.strip() or "checkpoints/best.pth",
         )
-        args.contrastive_checkpoint = str(resolved_pretrain_ckpt)
+        if allow_missing_pretrain_checkpoint and not resolved_pretrain_ckpt.exists():
+            args.contrastive_checkpoint = ""
+        else:
+            args.contrastive_checkpoint = str(resolved_pretrain_ckpt)
 
     mapping: list[tuple[str, object]] = [
         ("data.train_manifest_csv", args.train_manifest.strip()),
@@ -135,6 +146,7 @@ def apply_overrides(config: dict, args: argparse.Namespace) -> dict:
         ("data.root_dir", args.root_dir.strip()),
         ("finetune.output_dir", args.output_dir.strip()),
         ("finetune.contrastive_checkpoint_path", args.contrastive_checkpoint.strip()),
+        ("finetune.allow_missing_pretrain_checkpoint", allow_missing_pretrain_checkpoint),
         ("finetune.eval_checkpoint_path", args.finetune_checkpoint.strip()),
         ("finetune.selection_metric", args.selection_metric.strip()),
         ("finetune.epochs", args.epochs),

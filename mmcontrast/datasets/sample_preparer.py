@@ -30,7 +30,7 @@ class PairedSamplePreparer:
         require_eeg: bool = True,
         require_fmri: bool = True,
         require_band_power: bool = False,
-        subject_pack_cache_size: int = 5,
+        subject_pack_cache_size: int = 24,
         eeg_channel_indices: list[int] | tuple[int, ...] | None = None,
     ) -> None:
         self.root_dir = Path(root_dir) if root_dir else None

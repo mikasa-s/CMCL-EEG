@@ -15,6 +15,25 @@ DEFAULT_FULL_OUTPUT_ROOT = Path("pretrained_weights/pretrain_full")
 DEFAULT_STRICT_OUTPUT_ROOT = Path("pretrained_weights/pretrain_strict")
 
 
+def _resolve_mode_output_base(
+    *,
+    project_root: Path,
+    mode: str,
+    output_root: str = "",
+) -> Path:
+    normalized_mode = normalize_pretrain_mode(mode)
+    if not str(output_root).strip():
+        base = DEFAULT_FULL_OUTPUT_ROOT if normalized_mode == FULL_MODE else DEFAULT_STRICT_OUTPUT_ROOT
+        return base if base.is_absolute() else (project_root / base).resolve()
+
+    raw_base = Path(output_root)
+    resolved_base = raw_base if raw_base.is_absolute() else (project_root / raw_base).resolve()
+    expected_leaf = "pretrain_full" if normalized_mode == FULL_MODE else "pretrain_strict"
+    if resolved_base.name == expected_leaf:
+        return resolved_base.resolve()
+    return (resolved_base / expected_leaf).resolve()
+
+
 def normalize_pretrain_mode(mode: str) -> str:
     normalized = str(mode).strip().lower()
     if normalized not in VALID_PRETRAIN_MODES:
@@ -71,12 +90,10 @@ def resolve_pretrain_output_dir(
     normalized_mode = normalize_pretrain_mode(mode)
     objective = str(objective_name).strip() or "contrastive"
     if normalized_mode == FULL_MODE:
-        base = Path(output_root) if str(output_root).strip() else DEFAULT_FULL_OUTPUT_ROOT
-        resolved_base = base if base.is_absolute() else (project_root / base).resolve()
+        resolved_base = _resolve_mode_output_base(project_root=project_root, mode=normalized_mode, output_root=output_root)
         return (resolved_base / objective).resolve()
     dataset, subject = require_strict_identifiers(normalized_mode, target_dataset, held_out_subject)
-    base = Path(output_root) if str(output_root).strip() else DEFAULT_STRICT_OUTPUT_ROOT
-    resolved_base = base if base.is_absolute() else (project_root / base).resolve()
+    resolved_base = _resolve_mode_output_base(project_root=project_root, mode=normalized_mode, output_root=output_root)
     return (resolved_base / dataset / subject / objective).resolve()
 
 

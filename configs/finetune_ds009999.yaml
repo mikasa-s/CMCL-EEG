@@ -13,6 +13,7 @@ data:
   test_manifest_csv: cache/ds009999/loso_subjectwise/fold_ds009999_sub01/manifest_test.csv
   root_dir: cache/ds009999
   preload_dataset: false
+  subject_pack_cache_size: 24
   eeg_channel_subset: none
   eeg_channel_target_manifest: cache/ds009999/eeg_channels_target.csv
   expected_eeg_shape: [62, 8, 200]
@@ -53,6 +54,7 @@ fmri_model:
 finetune:
   output_dir: outputs/ds009999/finetune/fold_ds009999_sub01
   contrastive_checkpoint_path: ""
+  allow_missing_pretrain_checkpoint: true
   pretrain_mode: full
   pretrain_objective: contrastive
   pretrain_output_root: pretrained_weights

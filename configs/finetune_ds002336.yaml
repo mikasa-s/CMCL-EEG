@@ -1,10 +1,14 @@
 train:
   force_cpu: false
   gpu_count: 1
-  gpu_ids: [4]
-  batch_size: 256
-  eval_batch_size: 256
-  num_workers: 4
+  gpu_ids: []
+  batch_size: 128
+  eval_batch_size: 128
+  num_workers: 2
+  # gpu_ids: [4]
+  # batch_size: 256
+  # eval_batch_size: 256
+  # num_workers: 4
   pin_memory: true
 
 data:
@@ -29,7 +33,7 @@ data:
   fmri_normalize_nonzero_only: true
 
 eeg_model:
-  checkpoint_path: "pretrained_weights/contrastive_best.pth" # 
+  checkpoint_path: "" # 
   in_dim: 200
   out_dim: 200
   d_model: 200
@@ -44,7 +48,7 @@ eeg_model:
 
 fmri_model:
   backbone: neurostorm
-  checkpoint_path: "pretrained_weights/pt_neurostorm_mae_ratio0.5.ckpt"
+  checkpoint_path: ""
   shared_dim: 256
   img_size: [48, 48, 48, 1]
   in_chans: 1
@@ -62,6 +66,7 @@ fmri_model:
 finetune:
   output_dir: outputs/ds002336/finetune/fold_ds002336_sub01
   contrastive_checkpoint_path: ""
+  allow_missing_pretrain_checkpoint: true
   pretrain_mode: strict
   pretrain_objective: contrastive
   pretrain_output_root: pretrained_weights

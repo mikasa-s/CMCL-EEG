@@ -363,10 +363,11 @@ class TrainConfig:
             selection_metric = str(finetune_cfg.get("selection_metric", "accuracy")).strip().lower()
             if selection_metric not in {"accuracy", "acc", "macro_f1", "f1"}:
                 raise ValueError("finetune.selection_metric must be one of: accuracy, acc, macro_f1, f1")
+            allow_missing_pretrain_checkpoint = bool(finetune_cfg.get("allow_missing_pretrain_checkpoint", False))
             contrastive_checkpoint = str(finetune_cfg.get("contrastive_checkpoint_path", "")).strip()
             if contrastive_checkpoint:
                 resolved = root / contrastive_checkpoint
-                if not resolved.exists():
+                if not resolved.exists() and not allow_missing_pretrain_checkpoint:
                     raise FileNotFoundError(f"Contrastive checkpoint not found: {resolved}")
             eeg_baseline_cfg = finetune_cfg.get("eeg_baseline", {}) or {}
             if bool(eeg_baseline_cfg.get("enabled", False)):

@@ -62,6 +62,7 @@ fmri_model:
 finetune:
   output_dir: outputs/ds002338/finetune/fold_ds002338_sub01
   contrastive_checkpoint_path: ""
+  allow_missing_pretrain_checkpoint: true
   pretrain_mode: strict
   pretrain_objective: contrastive
   pretrain_output_root: pretrained_weights

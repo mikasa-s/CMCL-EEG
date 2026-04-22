@@ -126,7 +126,7 @@ class PairedEEGfMRIDataset(Dataset):
         require_eeg: bool = True,
         require_fmri: bool = True,
         require_band_power: bool = False,
-        subject_pack_cache_size: int = 5,
+        subject_pack_cache_size: int = 24,
         preload_dataset: bool | str = "auto",
         eeg_channel_subset: str = "none",
         eeg_channel_target_manifest: str = "",
