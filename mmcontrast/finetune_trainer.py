@@ -174,8 +174,17 @@ class FinetuneTrainer:
         self.enable_train_curve_visualization = bool(train_curve_cfg.get("enabled", False))
         confusion_matrix_cfg = visualization_cfg.get("confusion_matrix", {}) or {}
         self.enable_confusion_matrix_visualization = bool(confusion_matrix_cfg.get("enabled", False))
+        online_monitor_cfg = visualization_cfg.get("online_monitor", {}) or {}
+        self.enable_online_monitor = bool(online_monitor_cfg.get("enabled", False))
         visual_output_dir = str(train_curve_cfg.get("output_dir", "")).strip()
         self.train_curve_output_dir = self.resolve_path(visual_output_dir) if visual_output_dir else (self.output_dir / "visualizations")
+        online_output_dir = str(online_monitor_cfg.get("output_dir", "")).strip()
+        self.online_monitor_output_dir = self.resolve_path(online_output_dir) if online_output_dir else (self.output_dir / "finetune_online_monitor")
+        self.online_monitor_state_path = self.online_monitor_output_dir / "monitor_state.json"
+        self.online_monitor_loss_curve_path = self.online_monitor_output_dir / "loss_curve.svg"
+        self.online_monitor_accuracy_curve_path = self.online_monitor_output_dir / "accuracy_curve.svg"
+        self.online_monitor_sample_count = int(online_monitor_cfg.get("sample_count", 16))
+        self.last_train_accuracy: float | None = None
         eval_ckpt = str(finetune_cfg.get("eval_checkpoint_path", "")).strip()
         self.eval_checkpoint_path = self.resolve_path(eval_ckpt) if eval_ckpt else self.best_checkpoint_path
         self.test_only_mode = bool(finetune_cfg.get("test_only", False))
@@ -183,6 +192,14 @@ class FinetuneTrainer:
             self.ckpt_dir.mkdir(parents=True, exist_ok=True)
             if self.enable_train_curve_visualization:
                 self.train_curve_output_dir.mkdir(parents=True, exist_ok=True)
+            if self.enable_online_monitor:
+                self.online_monitor_output_dir.mkdir(parents=True, exist_ok=True)
+                self.write_online_monitor_state(
+                    phase="initialized",
+                    epoch=0,
+                    history=[],
+                    val_metrics=None,
+                )
 
     @staticmethod
     def count_parameters(model: torch.nn.Module) -> tuple[int, int]:
@@ -316,7 +333,7 @@ class FinetuneTrainer:
         with open(history_path, "w", encoding="utf-8") as handle:
             json.dump(history, handle, ensure_ascii=False, indent=2)
         with open(history_csv_path, "w", encoding="utf-8", newline="") as handle:
-            fieldnames = ["epoch", "train_loss", "val_loss", "val_accuracy", "val_macro_f1", "lr"]
+            fieldnames = ["epoch", "train_loss", "train_accuracy", "val_loss", "val_accuracy", "val_macro_f1", "lr"]
             writer = csv.DictWriter(handle, fieldnames=fieldnames)
             writer.writeheader()
             writer.writerows(history)
@@ -360,6 +377,127 @@ class FinetuneTrainer:
             if dataset_name in haystack:
                 return title
         return default_title
+
+    @staticmethod
+    def _now_text() -> str:
+        return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+
+    def _save_online_monitor_plot(self, output_path: Path, title: str, series_list: list[dict[str, Any]]) -> None:
+        try:
+            import matplotlib.pyplot as plt
+        except ImportError:
+            return
+        valid_series = []
+        for series in series_list:
+            xs = []
+            ys = []
+            for item in series.get("values", []):
+                y = item.get("y")
+                if y is None:
+                    continue
+                xs.append(float(item.get("x")))
+                ys.append(float(y))
+            if xs:
+                valid_series.append(
+                    {
+                        "label": str(series.get("label", "series")),
+                        "color": str(series.get("color", "#2563eb")),
+                        "x": xs,
+                        "y": ys,
+                    }
+                )
+        if not valid_series:
+            return
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        fig, ax = plt.subplots(figsize=(8, 5), dpi=160)
+        for series in valid_series:
+            ax.plot(series["x"], series["y"], linewidth=2.0, color=series["color"], label=series["label"])
+        ax.set_title(title)
+        ax.set_xlabel("Epoch")
+        ax.grid(True, alpha=0.25)
+        ax.legend(frameon=False)
+        if fig.axes:
+            axis = fig.axes[0]
+            stem = getattr(output_path, "stem", "")
+            if stem == "loss_curve":
+                axis.set_title("Train / Validation Loss Curve")
+                legend = axis.get_legend()
+                if legend:
+                    labels = ["Train Loss", "Validation Loss"]
+                    for text, label in zip(legend.get_texts(), labels):
+                        text.set_text(label)
+            elif stem == "accuracy_curve":
+                axis.set_title("Train / Validation Accuracy Curve")
+                legend = axis.get_legend()
+                if legend:
+                    legend_texts = legend.get_texts()
+                    labels = ["Validation Accuracy"] if len(legend_texts) == 1 else ["Train Accuracy", "Validation Accuracy"]
+                    for text, label in zip(legend_texts, labels):
+                        text.set_text(label)
+        fig.tight_layout()
+        fig.savefig(output_path, bbox_inches="tight")
+        plt.close(fig)
+
+    def write_online_monitor_state(
+        self,
+        *,
+        phase: str,
+        epoch: int,
+        history: list[dict[str, Any]],
+        val_metrics: dict[str, float] | None,
+    ) -> None:
+        if not is_main_process() or not self.enable_online_monitor:
+            return
+        self._save_online_monitor_plot(
+            self.online_monitor_loss_curve_path,
+            "训练/验证损失",
+            [
+                {
+                    "label": "train_loss",
+                    "color": "#2563eb",
+                    "values": [{"x": item.get("epoch"), "y": item.get("train_loss")} for item in history],
+                },
+                {
+                    "label": "val_loss",
+                    "color": "#dc2626",
+                    "values": [{"x": item.get("epoch"), "y": item.get("val_loss")} for item in history],
+                },
+            ],
+        )
+        self._save_online_monitor_plot(
+            self.online_monitor_accuracy_curve_path,
+            "Train / Validation Accuracy Curve",
+            [
+                {
+                    "label": "train_accuracy",
+                    "color": "#2563eb",
+                    "values": [{"x": item.get("epoch"), "y": item.get("train_accuracy")} for item in history],
+                },
+                {
+                    "label": "val_accuracy",
+                    "color": "#059669",
+                    "values": [{"x": item.get("epoch"), "y": item.get("val_accuracy")} for item in history],
+                },
+            ],
+        )
+        payload = {
+            "title": "Finetune Online Monitor",
+            "status": {
+                "phase": str(phase),
+                "epoch": int(epoch),
+                "fold": self.output_dir.name,
+                "updated_at": self._now_text(),
+            },
+            "loss_curve_image": self.online_monitor_loss_curve_path.name,
+            "accuracy_curve_image": self.online_monitor_accuracy_curve_path.name,
+            "latest_train_loss": None if not history else history[-1].get("train_loss"),
+            "latest_train_accuracy": None if not history else history[-1].get("train_accuracy"),
+            "latest_val_loss": None if not history else history[-1].get("val_loss"),
+            "latest_val_accuracy": None if not history else history[-1].get("val_accuracy"),
+            "latest_val_metrics": val_metrics or {},
+        }
+        with self.online_monitor_state_path.open("w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False, indent=2)
 
     def fit_svm_baseline(self) -> None:
         if hasattr(self.model, "module"):
@@ -409,6 +547,19 @@ class FinetuneTrainer:
             if test_metrics is not None:
                 final_metrics["test_metrics"] = test_metrics
                 svm_summary["test_metrics"] = test_metrics
+        self.write_online_monitor_state(
+            phase="finished",
+            epoch=1,
+            history=[
+                {
+                    "epoch": 1,
+                    "train_loss": None,
+                    "val_loss": None if val_metrics is None else float(val_metrics.get("loss", float("nan"))),
+                    "val_accuracy": None if val_metrics is None else float(val_metrics.get("accuracy", float("nan"))),
+                }
+            ] if val_metrics is not None else [],
+            val_metrics=val_metrics,
+        )
         self.save_metrics("svm_summary.json", svm_summary)
         self.save_metrics("final_metrics.json", final_metrics)
         cleanup_distributed()
@@ -496,6 +647,8 @@ class FinetuneTrainer:
 
         self.model.train()
         running = 0.0
+        correct = 0.0
+        total = 0.0
 
         for step, batch in enumerate(self.train_loader, start=1):
             eeg = batch["eeg"].to(self.device, non_blocking=True) if "eeg" in batch else None
@@ -530,8 +683,16 @@ class FinetuneTrainer:
             if optimizer_stepped:
                 self.scheduler.step()
             running += float(loss.item())
+            with torch.no_grad():
+                preds = out["logits"].detach().argmax(dim=1)
+                correct += float((preds == labels).sum().item())
+                total += float(labels.numel())
 
         epoch_loss = running / max(1, len(self.train_loader))
+        counts = torch.tensor([[correct, total]], device=self.device, dtype=torch.float64)
+        counts = gather_tensor(counts).sum(dim=0)
+        total_count = float(counts[1].item())
+        self.last_train_accuracy = float(counts[0].item() / total_count) if total_count > 0 else None
         return epoch_loss
 
     @torch.no_grad()
@@ -632,17 +793,25 @@ class FinetuneTrainer:
                 {
                     "epoch": int(epoch),
                     "train_loss": float(train_loss),
+                    "train_accuracy": None if self.last_train_accuracy is None else float(self.last_train_accuracy),
                     "val_loss": None if val_metrics is None else float(val_metrics["loss"]),
                     "val_accuracy": None if val_metrics is None else float(val_metrics["accuracy"]),
                     "val_macro_f1": None if val_metrics is None else float(val_metrics["macro_f1"]),
                     "lr": float(self.optimizer.param_groups[0]["lr"]),
                 }
             )
+            self.write_online_monitor_state(
+                phase="training",
+                epoch=epoch,
+                history=training_history,
+                val_metrics=val_metrics,
+            )
 
             if is_main_process():
                 summary_parts = [
                     f"epoch={epoch:03d}/{self.epochs:03d}",
                     f"train_loss={train_loss:.6f}",
+                    f"train_accuracy={0.0 if self.last_train_accuracy is None else self.last_train_accuracy:.4f}",
                     f"lr={self.optimizer.param_groups[0]['lr']:.3e}",
                 ]
                 if val_metrics is not None:
@@ -704,6 +873,12 @@ class FinetuneTrainer:
             if test_metrics is not None:
                 final_metrics["test_metrics"] = test_metrics
                 self.save_metrics("test_metrics.json", test_metrics)
+        self.write_online_monitor_state(
+            phase="finished",
+            epoch=epoch,
+            history=training_history,
+            val_metrics=last_val_metrics,
+        )
         if is_main_process():
             print(f"Finetune fold summary: fold_elapsed={fold_elapsed_seconds:.1f}s", flush=True)
         self.save_metrics("final_metrics.json", final_metrics)

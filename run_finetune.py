@@ -123,8 +123,16 @@ def apply_overrides(config: dict, args: argparse.Namespace) -> dict:
     if (not args.contrastive_checkpoint.strip()) and str(args.pretrain_mode).strip():
         target_dataset = args.target_dataset.strip() or infer_target_dataset_from_root_dir(args.root_dir.strip() or str((config.get("data", {}) or {}).get("root_dir", "")))
         held_out_subject = args.held_out_subject.strip()
-        if not held_out_subject and args.test_manifest.strip():
-            held_out_subject = infer_held_out_subject_from_manifest(args.test_manifest.strip())
+        data_cfg = dict(config.get("data", {}) or {})
+        if not held_out_subject:
+            test_manifest = args.test_manifest.strip() or str(data_cfg.get("test_manifest_csv", "")).strip()
+            if test_manifest:
+                held_out_subject = infer_held_out_subject_from_manifest(test_manifest)
+        if not held_out_subject:
+            output_dir = args.output_dir.strip() or str(finetune_cfg.get("output_dir", "")).strip()
+            fold_name = Path(output_dir).name
+            if fold_name.startswith("fold_"):
+                held_out_subject = infer_held_out_subject_from_fold_name(fold_name)
         resolved_pretrain_ckpt = resolve_pretrain_checkpoint_path(
             project_root=PROJECT_ROOT,
             mode=args.pretrain_mode.strip(),
